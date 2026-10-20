@@ -68,6 +68,7 @@ Arch and derivatives ☑️ tested
       ntfs-3g
 
 
+## Build from source ##
 
 These are the dependencies youll need if you want to compile it by yourself: (ubuntu)
 
