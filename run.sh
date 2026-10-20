@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+if [[ "${1:-}" == "--dev" ]]; then
+    echo "Starting macOS Finder in development mode (Vite + Cargo watch)..."
+    exec npm run tauri dev
+fi
+
+RELEASE_BIN="$SCRIPT_DIR/src-tauri/target/release/macos-finder"
+
+if [[ ! -x "$RELEASE_BIN" ]]; then
+    echo "Building optimized native release binary (first-time setup)..."
+    npx tauri build --no-bundle
+fi
+
+# Use WebKitGTK hardware acceleration flags for smooth rendering
+export WEBKIT_DISABLE_COMPOSITING_MODE=0
+exec "$RELEASE_BIN"

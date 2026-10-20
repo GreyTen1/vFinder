@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>macOS Finder Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="header-left">
+        <img src="icons/icon-32.png" alt="Finder" class="logo">
+        <div>
+          <h1 class="title">macOS Finder</h1>
+          <p class="subtitle">Download Manager</p>
+        </div>
+      </div>
+      <div id="statusDot" class="status-dot offline" title="Checking status..."></div>
+    </div>
+
+    <div class="status-banner" id="statusBanner">
+      <span class="status-text" id="statusText">Checking Finder connection...</span>
+    </div>
+
+    <div class="setting-row">
+      <div class="setting-label">
+        <span class="setting-title">Intercept Downloads</span>
+        <span class="setting-desc">Prompt Finder to choose save location</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="interceptToggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button id="testBtn" class="btn btn-secondary">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2v8m-3-3l3 3 3-3M2 13h12"/>
+        </svg>
+        Send Test Download
+      </button>
+      <button id="refreshBtn" class="btn btn-secondary" title="Check connection">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9L2 6"/>
+          <path d="M2 2v4h4"/>
+        </svg>
+        Refresh
+      </button>
+    </div>
+
+    <div class="footer">
+      <span>When active, downloads pop up in Finder so you can choose where to store them.</span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

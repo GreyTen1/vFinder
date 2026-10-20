@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Finder",
+  "version": "1.0.0",
+  "identifier": "com.apple-style.finder",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "Finder",
+        "width": 1160,
+        "height": 740,
+        "minWidth": 760,
+        "minHeight": 480,
+        "decorations": false,
+        "transparent": false,
+        "visible": false,
+        "backgroundColor": "#1e1e22",
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**",
+          "**/*",
+          "/*",
+          "/**/*",
+          "$HOME/**",
+          "$CACHE/**",
+          "$TEMP/**",
+          "/home/**",
+          "/run/media/**",
+          "/media/**",
+          "/mnt/**",
+          "/tmp/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}

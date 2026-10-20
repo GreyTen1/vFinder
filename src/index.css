@@ -1,0 +1,142 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    box-sizing: border-box;
+    user-select: none;
+    touch-action: pan-x pan-y !important;
+  }
+
+  html,
+  body,
+  #root {
+    touch-action: pan-x pan-y !important;
+  }
+
+  input,
+  textarea,
+  pre,
+  code {
+    user-select: text;
+  }
+
+  button,
+  a,
+  div,
+  aside,
+  main {
+    outline: none !important;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* macOS disclosure arrow rotation */
+.disclosure-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  transform: rotate(0deg);
+  transform-origin: 50% 50%;
+  transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1),
+              color 150ms ease;
+  pointer-events: none;
+}
+
+.disclosure-arrow.is-open {
+  transform: rotate(90deg);
+  color: #0a84ff;
+}
+
+/* macOS Finder Folder Accordion Unfolding Animation */
+.folder-unfold-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 200ms cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: grid-template-rows, opacity;
+}
+
+.folder-unfold-grid.is-expanded {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.folder-unfold-grid:not(.is-expanded) {
+  pointer-events: none;
+}
+
+.folder-unfold-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* WebKitGTK compositor layer isolation:
+ * Forces distinct GPU hardware compositing layers for Toolbar, Sidebar, Main View, and Status Bars.
+ * Prevents dirty-rect damage rect clobbering, pixel smearing, and ghost rendering across pane boundaries during fast scrolling.
+ */
+.macos-layer-isolate {
+  transform: translateZ(0);
+  will-change: transform;
+  isolation: isolate;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+/* Custom macOS-style thin scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(142, 142, 147, 0.35);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(142, 142, 147, 0.65);
+}
+
+/* Clean macOS sidebar surface (solid color avoids WebKitGTK dirty-rect gradient artifacts) */
+.macos-sidebar-glass-dark {
+  background-color: #212126;
+}
+
+.macos-sidebar-glass-light {
+  background-color: #eaeaf0;
+}
+
+/* macOS Finder Sidebar Smooth Collapse / Expand Animation (GPU composited, 0 reflow) */
+.macos-sidebar-container {
+  width: 240px;
+  min-width: 240px;
+  max-width: 240px;
+  height: 100%;
+  flex-shrink: 0;
+  margin-left: 0;
+  opacity: 1;
+  transition: margin-left 220ms cubic-bezier(0.25, 1, 0.5, 1),
+              opacity 180ms ease;
+  will-change: margin-left, opacity;
+  transform: translateZ(0);
+}
+
+.macos-sidebar-container.is-collapsed {
+  margin-left: -240px;
+  opacity: 0;
+  pointer-events: none;
+}

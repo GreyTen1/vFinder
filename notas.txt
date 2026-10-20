@@ -1,0 +1,63 @@
+Even if you round your background :root and body, your top header is still a square box that sits on top of those curves and covers them up.
+
+The Fix:
+Put a wrapper div around your entire app.
+Give that wrapper overflow: hidden and your border-radius.
+
+Note: If you use Modals, make sure they are portaled inside that wrapper, not to the document body, or they will still look square!
+
+Here's how i doing it on my app
+
+tauri.config.json
+
+"app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "Zync",
+        "width": 1000,
+        "height": 700,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "dragDropEnabled": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    }
+  }
+MainLayout.tsx
+
+// Main Layout
+<div className="rounded-xl overflow-hidden bg-app-bg h-screen border border-app-border">
+   <Sidebar />
+   <TitleBar />
+   <AppContent />
+   
+   {/* Internal Portal Root (Crucial for Modals) */}
+   <div id="modal-portal-root" className="absolute inset-0 pointer-events-none" />
+</div>
+index.css
+
+    html,
+    body,
+    #root {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      /* The body must be transparent for the rounded container's 
+         corners to actually show the desktop behind them */
+      background: transparent !important;
+    }
+
+    body {
+      overflow: hidden;
+    }
