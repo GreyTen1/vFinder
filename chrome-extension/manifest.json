@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "macOS Finder Download Manager",
+  "name": "vFinder Download Manager",
   "version": "1.0.0",
-  "description": "Intercepts browser downloads and sends them directly to macOS Finder file manager.",
+  "description": "Intercepts browser downloads and sends them directly to vFinder file manager.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAicVSLFlCjhqekJT+X+zdD1dpsYYip4YdIhn06SK3DrjXnDf9xXUFscn3miFNLhh07UPvAmgKXSGnH23SRezGQPX9OxcqcbfQnNwuDC5g4Z9uGCS/T7xKFwJRympYy4akct16XMlLGAaavnSNvZc2opNpjf+hFaB4RSCo068ALVqAPyACU1mXNMyK2V+o+6rv8Jozxs4HdCLjmurRYiTPGME6q3pE4geu4g27DuMmLvADTPFRv0pqB1m713GFlG4j996mshXlXqWIZWYcalTiYnujl1EP5ceh2pzecYng0wleWCasqAO1F/DgozjL7JFZolY3RmlhAT/eqWZpvTCMqQIDAQAB",
   "permissions": [
     "downloads",
@@ -35,7 +35,7 @@
         "default": "Ctrl+Shift+S",
         "mac": "Command+Shift+S"
       },
-      "description": "Download or save current page/file with macOS Finder"
+      "description": "Download or save current page/file with vFinder"
     }
   },
   "action": {

@@ -2,12 +2,12 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/com.apple-style.finder"
-APP_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/com.apple-style.finder"
-APP_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/com.apple-style.finder"
+APP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/com.vfinder.filemanager"
+APP_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/com.vfinder.filemanager"
+APP_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/com.vfinder.filemanager"
 
 echo "========================================================"
-echo "  macOS Finder File Manager - Uninstaller & Cleanup"
+echo "  vFinder File Manager - Uninstaller & Cleanup"
 echo "========================================================"
 echo ""
 echo "Note: No new system (pacman) packages were installed because"
@@ -22,10 +22,13 @@ rm -rf "$PROJECT_DIR/src-tauri/target"
 echo "  -> Removed node_modules/, dist/, and src-tauri/target/"
 
 # 2. Remove any local app config/cache/tags created by the app
-echo "[2/3] Removing application config, cache, and tag metadata..."
+echo "[2/3] Removing application config, cache, tag metadata, and desktop shortcuts..."
 rm -rf "$APP_CONFIG_DIR" "$APP_DATA_DIR" "$APP_CACHE_DIR"
-rm -f "$HOME/.config/finder-tags.json"
-echo "  -> Removed app configuration and tag files."
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/com.apple-style.finder" "${XDG_DATA_HOME:-$HOME/.local/share}/com.apple-style.finder" "${XDG_CACHE_HOME:-$HOME/.cache}/com.apple-style.finder"
+rm -f "$HOME/.config/vfinder-tags.json" "$HOME/.config/finder-tags.json"
+rm -f "$HOME/.local/share/applications/vfinder.desktop" "$HOME/.local/share/applications/macos-finder.desktop"
+rm -f "$HOME/.local/share/icons/hicolor/"*"/apps/vfinder.png" "$HOME/.local/share/icons/hicolor/"*"/apps/macos-finder.png"
+echo "  -> Removed app configuration, tag files, and desktop entry."
 
 # 3. Ask if user wants to delete the source code files too
 echo ""

@@ -5,15 +5,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [[ "${1:-}" == "--dev" ]]; then
-    echo "Starting macOS Finder in development mode (Vite + Cargo watch)..."
+    echo "Starting vFinder in development mode (Vite + Cargo watch)..."
     exec npm run tauri dev
 fi
 
-RELEASE_BIN="$SCRIPT_DIR/src-tauri/target/release/macos-finder"
+RELEASE_BIN="$SCRIPT_DIR/src-tauri/target/release/vfinder"
+if [[ ! -x "$RELEASE_BIN" && -x "$SCRIPT_DIR/src-tauri/target/release/macos-finder" ]]; then
+    RELEASE_BIN="$SCRIPT_DIR/src-tauri/target/release/macos-finder"
+fi
 
 if [[ ! -x "$RELEASE_BIN" ]]; then
     echo "Building optimized native release binary (first-time setup)..."
     npx tauri build --no-bundle
+    RELEASE_BIN="$SCRIPT_DIR/src-tauri/target/release/vfinder"
 fi
 
 # Use WebKitGTK hardware acceleration flags for smooth rendering

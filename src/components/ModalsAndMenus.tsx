@@ -1229,7 +1229,7 @@ export const SudoPromptModal: React.FC<SudoPromptModalProps> = ({
         </div>
 
         <h3 className="text-[14px] font-bold leading-snug">
-          Finder wants to {actionVerb} “{prompt.volumeName}”
+          vFinder wants to {actionVerb} “{prompt.volumeName}”
         </h3>
         <p className="text-xs opacity-65 mt-1">
           Enter your administrator (sudo) password to {actionVerb}{" "}

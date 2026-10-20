@@ -1863,27 +1863,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "macos-finder"
-version = "1.0.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "dirs 6.0.0",
- "gtk",
- "image",
- "md-5",
- "mime_guess",
- "open",
- "serde",
- "serde_json",
- "sysinfo",
- "tauri",
- "tauri-build",
- "trash",
- "webkit2gtk",
-]
-
-[[package]]
 name = "markup5ever"
 version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3920,6 +3899,27 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vfinder"
+version = "1.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dirs 6.0.0",
+ "gtk",
+ "image",
+ "md-5",
+ "mime_guess",
+ "open",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "trash",
+ "webkit2gtk",
+]
 
 [[package]]
 name = "vswhom"

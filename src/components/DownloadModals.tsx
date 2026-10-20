@@ -571,7 +571,7 @@ export const DownloadsPopover: React.FC<DownloadsPopoverProps> = ({
                       <button
                         type="button"
                         onClick={() => onShowInFolder(item.targetPath)}
-                        title="Show in Finder"
+                        title="Show in vFinder"
                         className="p-1 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition cursor-pointer"
                       >
                         <Search className="w-3.5 h-3.5 text-[#0a84ff]" />

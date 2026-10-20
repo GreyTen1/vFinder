@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Finder",
+  "productName": "vFinder",
   "version": "1.0.0",
-  "identifier": "com.apple-style.finder",
+  "identifier": "com.vfinder.filemanager",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "Finder",
+        "title": "vFinder",
         "width": 1160,
         "height": 740,
         "minWidth": 760,
@@ -51,7 +51,11 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/icon.png"
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ]
   }
 }

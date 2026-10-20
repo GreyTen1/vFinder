@@ -10,14 +10,14 @@ document.addEventListener("DOMContentLoaded", () => {
     toggle.checked = status.enabled;
     if (status.alive) {
       statusDot.className = "status-dot online";
-      statusDot.title = "Connected to Finder";
+      statusDot.title = "Connected to vFinder";
       statusBanner.className = "status-banner online";
-      statusText.textContent = `Connected to Finder (Port ${status.port})`;
+      statusText.textContent = `Connected to vFinder (Port ${status.port})`;
     } else {
       statusDot.className = "status-dot offline";
-      statusDot.title = "Finder Standby";
+      statusDot.title = "vFinder Standby";
       statusBanner.className = "status-banner";
-      statusText.textContent = "Standby (Finder will automatically pop up on download)";
+      statusText.textContent = "Standby (vFinder will automatically pop up on download)";
     }
   }
 
@@ -53,9 +53,9 @@ document.addEventListener("DOMContentLoaded", () => {
       testBtn.disabled = false;
       testBtn.innerHTML = oldText;
       if (res && res.success) {
-        statusText.textContent = "Test download sent to Finder!";
+        statusText.textContent = "Test download sent to vFinder!";
       } else {
-        alert("Failed to pop up Finder. Make sure macOS Finder is running or installed.");
+        alert("Failed to pop up vFinder. Make sure vFinder is running or installed.");
       }
     });
   });

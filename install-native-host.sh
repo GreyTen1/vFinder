@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS Finder Download Manager - Native Messaging Host Installer
+# vFinder Download Manager - Native Messaging Host Installer
 # Registers the native messaging manifest for all installed Chromium and Firefox based browsers
 
 set -e
@@ -12,7 +12,7 @@ chmod +x "$HOST_SCRIPT"
 MANIFEST_CONTENT=$(cat <<EOF
 {
   "name": "com.macosfinder.downloader",
-  "description": "macOS Finder Native Messaging Host for Downloads",
+  "description": "vFinder Native Messaging Host for Downloads",
   "path": "$HOST_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
@@ -55,4 +55,4 @@ if [ "$COUNT" -eq 0 ]; then
   echo "Created default manifest in $default_nm"
 fi
 
-echo "macOS Finder Native Messaging Host setup complete ($COUNT browser(s) configured)."
+echo "vFinder Native Messaging Host setup complete ($COUNT browser(s) configured)."

@@ -1,8 +1,8 @@
 [package]
-name = "macos-finder"
+name = "vfinder"
 version = "1.0.0"
-description = "Apple macOS Finder-inspired File Manager"
-authors = ["macOS Finder Contributors"]
+description = "vFinder File Manager"
+authors = ["vFinder Contributors"]
 edition = "2021"
 
 [build-dependencies]

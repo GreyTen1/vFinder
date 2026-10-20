@@ -2862,7 +2862,7 @@ export const App: React.FC = () => {
     >
       {/* Top Unified macOS Finder Toolbar & Tab Strip */}
       <Toolbar
-        currentTitle={activeTab?.title || "Finder"}
+        currentTitle={activeTab?.title || "vFinder"}
         canGoBack={(activeTab?.historyIndex ?? 0) > 0}
         canGoForward={
           (activeTab?.historyIndex ?? 0) <

@@ -45,7 +45,7 @@ fn current_epoch_ms() -> u128 {
 }
 
 fn drag_state_file_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("macos-finder-drag-state.json")
+    std::env::temp_dir().join("vfinder-drag-state.json")
 }
 
 pub fn write_cross_window_drag_start(paths: &[String]) {
@@ -319,6 +319,9 @@ fn main() {
         .setup(|app| {
             download_server::start_download_server(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
+                if let Some(icon) = app.default_window_icon() {
+                    let _ = window.set_icon(icon.clone());
+                }
                 let _ = window.set_background_color(Some(Color(30, 30, 34, 255)));
                 #[cfg(target_os = "linux")]
                 setup_linux_webview(&window);
@@ -373,5 +376,5 @@ fn main() {
             commands::get_pending_downloads,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running macOS Finder application");
+        .expect("error while running vFinder application");
 }

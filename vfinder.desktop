@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=vFinder
+Comment=vFinder File Manager
+Exec=/home/seba/fileManager/run.sh
+Icon=vfinder
+Terminal=false
+Type=Application
+Categories=System;FileManager;Utility;
+StartupWMClass=vfinder
+MimeType=inode/directory;

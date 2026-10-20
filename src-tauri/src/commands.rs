@@ -2294,7 +2294,7 @@ pub async fn get_image_thumbnail(
 
         let cache_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("macos-finder/thumbnails");
+            .join("vfinder/thumbnails");
         let _ = fs::create_dir_all(&cache_dir);
 
         use md5::Digest;
@@ -2443,7 +2443,7 @@ pub async fn save_dropped_urls(
                         "--max-time",
                         "25",
                         "-A",
-                        "Mozilla/5.0 (X11; Linux x86_64) Finder/1.0",
+                        "Mozilla/5.0 (X11; Linux x86_64) vFinder/1.0",
                         "-o",
                         &target_str,
                         url,

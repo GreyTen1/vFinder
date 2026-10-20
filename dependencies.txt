@@ -1,5 +1,5 @@
 ================================================================================
-  macOS Finder File Manager — Debian / Ubuntu System Dependencies Guide
+  vFinder File Manager — Debian / Ubuntu System Dependencies Guide
 ================================================================================
 
 This document details all system packages and dependencies required to either:
@@ -72,7 +72,7 @@ Package Descriptions:
 3. BUILD DEPENDENCIES (To compile the project from source)
 --------------------------------------------------------------------------------
 
-If you want to build `macos-finder` from source:
+If you want to build `vFinder` from source:
 
 STEP 3.1: Install C/C++ compiler and development headers
 --------------------------------------------------------------------------------
@@ -118,9 +118,9 @@ STEP 3.4: Install project dependencies & compile
   npx tauri build --no-bundle
 
   The compiled standalone binary will be placed at:
-    src-tauri/target/release/macos-finder
+    src-tauri/target/release/vfinder
 
-  (You can run it directly: `./src-tauri/target/release/macos-finder`)
+  (You can run it directly: `./src-tauri/target/release/vfinder` or `./run.sh`)
 
 --------------------------------------------------------------------------------
 4. BROWSER EXTENSION INTEGRATION (Chrome, Brave, Edge, Chromium)

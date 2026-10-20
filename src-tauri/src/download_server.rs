@@ -131,7 +131,10 @@ pub fn register_native_messaging_host() {
         exe_dir.join("native-messaging-host.py"),
         exe_dir.join("../../native-messaging-host.py"),
         exe_dir.join("../../../native-messaging-host.py"),
+        home.join(".local/share/vfinder/native-messaging-host.py"),
         home.join(".local/share/macos-finder/native-messaging-host.py"),
+        PathBuf::from("/usr/lib/vfinder/native-messaging-host.py"),
+        PathBuf::from("/usr/share/vfinder/native-messaging-host.py"),
         PathBuf::from("/usr/lib/macos-finder/native-messaging-host.py"),
         PathBuf::from("/usr/share/macos-finder/native-messaging-host.py"),
     ];
@@ -263,7 +266,7 @@ Connection: close\r\n\
 
     // Healthcheck / ping route
     if method == "GET" && path == "/ping" {
-        let body = r#"{"status":"ok","app":"macos-finder","version":"1.0.0"}"#;
+        let body = r#"{"status":"ok","app":"vfinder","version":"1.0.0"}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\n\
 Content-Type: application/json\r\n\
@@ -302,9 +305,10 @@ Connection: close\r\n\
                     let _ = stream.write_all(response.as_bytes());
 
                     // Determine if an instance is already open:
-                    // If Finder was already open and shown, or if another download is already open,
+                    // If vFinder was already open and shown, or if another download is already open,
                     // we MUST open a new window for this download!
-                    let is_spawned_by_download = std::env::var("MACOS_FINDER_SPAWNED_BY_DOWNLOAD").is_ok();
+                    let is_spawned_by_download = std::env::var("MACOS_FINDER_SPAWNED_BY_DOWNLOAD").is_ok()
+                        || std::env::var("VFINDER_SPAWNED_BY_DOWNLOAD").is_ok();
                     let main_win_opt = app.get_webview_window("main");
                     let main_already_open = main_win_opt
                         .as_ref()
@@ -334,7 +338,7 @@ Connection: close\r\n\
                             &win_label,
                             tauri::WebviewUrl::default(),
                         )
-                        .title("Finder")
+                        .title("vFinder")
                         .inner_size(1160.0, 740.0)
                         .min_inner_size(760.0, 480.0)
                         .decorations(false)

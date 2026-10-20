@@ -15,12 +15,20 @@ SERVER_URL = "http://127.0.0.1:45456"
 def find_finder_binary():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
+        os.path.join(script_dir, "vfinder"),
+        os.path.join(script_dir, "vFinder"),
         os.path.join(script_dir, "finder"),
+        os.path.join(script_dir, "src-tauri", "target", "release", "vfinder"),
         os.path.join(script_dir, "src-tauri", "target", "release", "macos-finder"),
+        shutil.which("vfinder"),
+        shutil.which("vFinder"),
         shutil.which("macos-finder"),
         shutil.which("finder"),
+        os.path.expanduser("~/.local/bin/vfinder"),
         os.path.expanduser("~/.local/bin/finder"),
         os.path.expanduser("~/.local/bin/macos-finder"),
+        "/usr/local/bin/vfinder",
+        "/usr/bin/vfinder",
         "/usr/local/bin/finder",
         "/usr/bin/finder",
         "/usr/bin/macos-finder",
@@ -28,13 +36,15 @@ def find_finder_binary():
     for c in candidates:
         if c and os.path.isfile(c) and os.access(c, os.X_OK):
             return c, os.path.dirname(c)
-    fallback = os.path.join(script_dir, "finder")
+    fallback = os.path.join(script_dir, "vfinder")
+    if not os.path.isfile(fallback):
+        fallback = os.path.join(script_dir, "finder")
     return fallback, script_dir
 
 def log(msg):
     # Optional debug logging if needed
     try:
-        with open("/tmp/macos-finder-native-host.log", "a") as f:
+        with open("/tmp/vfinder-native-host.log", "a") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     except Exception:
         pass
@@ -56,22 +66,22 @@ def raise_finder_window():
 
     if is_hyprland and shutil.which("hyprctl"):
         try:
-            subprocess.run(["hyprctl", "dispatch", "focuswindow", "class:^(finder)$"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
-            subprocess.run(["hyprctl", "dispatch", "alterzorder", "top,class:^(finder)$"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            subprocess.run(["hyprctl", "dispatch", "focuswindow", "class:^(vfinder|vFinder|finder)$"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            subprocess.run(["hyprctl", "dispatch", "alterzorder", "top,class:^(vfinder|vFinder|finder)$"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
             return
         except Exception as e:
             log(f"hyprctl error: {e}")
 
     if is_sway and shutil.which("swaymsg"):
         try:
-            subprocess.run(["swaymsg", '[app_id="(?i)finder"] focus'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            subprocess.run(["swaymsg", '[app_id="(?i)(vfinder|finder)"] focus'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
             return
         except Exception as e:
             log(f"swaymsg error: {e}")
 
     if is_i3 and shutil.which("i3-msg"):
         try:
-            subprocess.run(["i3-msg", '[class="(?i)finder"] focus'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            subprocess.run(["i3-msg", '[class="(?i)(vfinder|finder)"] focus'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
             return
         except Exception as e:
             log(f"i3-msg error: {e}")
@@ -79,13 +89,17 @@ def raise_finder_window():
     # Generic X11 / Xwayland helpers (GNOME X11, KDE X11, XFCE, Cinnamon, MATE, LXQt, etc.)
     if shutil.which("wmctrl"):
         try:
-            subprocess.run(["wmctrl", "-x", "-a", "finder"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            res = subprocess.run(["wmctrl", "-x", "-a", "vfinder"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            if res.returncode != 0:
+                subprocess.run(["wmctrl", "-x", "-a", "finder"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
             return
         except Exception as e:
             log(f"wmctrl error: {e}")
     elif shutil.which("xdotool"):
         try:
-            subprocess.run(["xdotool", "search", "--class", "finder", "windowactivate"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            res = subprocess.run(["xdotool", "search", "--class", "vfinder", "windowactivate"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
+            if res.returncode != 0:
+                subprocess.run(["xdotool", "search", "--class", "finder", "windowactivate"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.5)
             return
         except Exception as e:
             log(f"xdotool error: {e}")

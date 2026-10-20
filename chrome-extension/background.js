@@ -79,7 +79,7 @@ chrome.runtime.onInstalled.addListener(() => {
   try {
     chrome.contextMenus.create({
       id: "macos-finder-download",
-      title: "Download with macOS Finder",
+      title: "Download with vFinder",
       contexts: ["page", "link", "image", "video", "audio"],
     });
   } catch (e) {
