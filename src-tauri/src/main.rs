@@ -1,5 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "linux")]
+fn init_linux_app_icon() {
+    use gtk::gdk_pixbuf::PixbufLoader;
+    use gtk::prelude::*;
+
+    gtk::glib::set_prgname(Some("vfinder"));
+    gtk::glib::set_application_name("vFinder");
+
+    let loader = PixbufLoader::new();
+    let _ = loader.write(include_bytes!("../icons/128x128.png"));
+    let _ = loader.close();
+    if let Some(pixbuf) = loader.pixbuf() {
+        gtk::Window::set_default_icon(&pixbuf);
+        gtk::Window::set_default_icon_name("vfinder");
+    }
+}
+
 mod commands;
 mod download_manager;
 mod download_server;
@@ -110,6 +127,17 @@ struct ExternalUrlDropPayload {
 
 #[cfg(target_os = "linux")]
 pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
+    if let Ok(gtk_win) = window.gtk_window() {
+        use gtk::gdk_pixbuf::PixbufLoader;
+        use gtk::prelude::*;
+        let loader = PixbufLoader::new();
+        let _ = loader.write(include_bytes!("../icons/128x128.png"));
+        let _ = loader.close();
+        if let Some(pixbuf) = loader.pixbuf() {
+            gtk_win.set_icon(Some(&pixbuf));
+            gtk_win.set_icon_name(Some("vfinder"));
+        }
+    }
     let app_handle = window.app_handle().clone();
     let _ = window.with_webview(move |webview| {
         use gtk::glib::object::ObjectType;
@@ -317,6 +345,8 @@ pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            #[cfg(target_os = "linux")]
+            init_linux_app_icon();
             download_server::start_download_server(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(icon) = app.default_window_icon() {

@@ -2,7 +2,7 @@
 Name=vFinder
 Comment=vFinder File Manager
 Exec=/home/seba/fileManager/run.sh
-Icon=vfinder
+Icon=/home/seba/fileManager/src-tauri/icons/128x128.png
 Terminal=false
 Type=Application
 Categories=System;FileManager;Utility;
