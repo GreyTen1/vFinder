@@ -24,7 +24,7 @@ Altough It's way far from perfect right now, I believe it can be a usable daily 
 
 ## Compatible distros ##
 
-Ubuntu (26.04,25.04,24,04) 
+Ubuntu (26.04 LTS, 25.04 LTS, 24,04 LTS) 
 
 Dependencies:
 
