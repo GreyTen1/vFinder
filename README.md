@@ -15,6 +15,13 @@ A file explorer written in TypeScript, TailWind, and Rust
 It looks cool! currently, there are many other incredible good options around here, but none of them looks like macos' file explorer (finder)
 Altough It's way far from perfect right now, I believe it can be a usable daily driver for those who enjoy this aesthetic 
 
+## Features? ##
+
+- Drag & Drop between programs
+- split tabs
+- thumbnail previsualization
+- Download manager (optional)
+
 ## Compatible distros ##
 
 Ubuntu (26.04,25.04,24,04) 
