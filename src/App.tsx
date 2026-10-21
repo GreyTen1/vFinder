@@ -3327,6 +3327,7 @@ export const App: React.FC = () => {
         activeTabId={activeTabId}
         splitTab={splitPane ? { id: splitPane.tabId, title: splitPane.title } : null}
         splitTabLeft={splitTabLeft}
+        tabStripStartOffset={sidebarLayoutOpen ? 240 : 0}
         canSplitTab={tabs.length >= 2}
         onSelectTab={handleSelectTab}
         onSplitTab={handleSplitTab}

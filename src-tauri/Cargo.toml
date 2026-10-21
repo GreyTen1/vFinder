@@ -6,6 +6,7 @@ authors = ["vFinder Contributors"]
 edition = "2021"
 
 [features]
+default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]

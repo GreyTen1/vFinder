@@ -61,6 +61,7 @@ interface ToolbarProps {
   activeTabId: string;
   splitTab?: Pick<FinderTab, "id" | "title"> | null;
   splitTabLeft?: number | null;
+  tabStripStartOffset?: number;
   canSplitTab: boolean;
   onCloseSplitPane: () => void;
   onSelectTab: (id: string) => void;
@@ -115,6 +116,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   activeTabId,
   splitTab = null,
   splitTabLeft = null,
+  tabStripStartOffset = 0,
   canSplitTab,
   onCloseSplitPane,
   onSelectTab,
@@ -916,6 +918,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         onPointerUp={finishTabDrag}
         onPointerCancel={cancelTabDrag}
         onClick={handleTabStripClick}
+        style={{ paddingLeft: `${12 + tabStripStartOffset}px` }}
         className={`relative z-10 flex items-end h-10 px-3 gap-1 text-xs border-t overflow-visible ${
           darkMode
             ? "bg-[#202024] border-white/5"
@@ -926,7 +929,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           className={`flex h-[calc(100%+2px)] min-w-0 self-start items-end gap-1 overflow-x-auto pb-[2px] ${splitTab ? "w-1/2 shrink-0" : "w-full"}`}
           style={
             splitTab && splitTabLeft !== null
-              ? { width: `${Math.max(0, splitTabLeft - 12)}px` }
+              ? {
+                  width: `${Math.max(
+                    0,
+                    splitTabLeft - 12 - tabStripStartOffset
+                  )}px`,
+                }
               : undefined
           }
         >
