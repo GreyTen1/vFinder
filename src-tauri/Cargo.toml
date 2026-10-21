@@ -5,6 +5,9 @@ description = "vFinder File Manager"
 authors = ["vFinder Contributors"]
 edition = "2021"
 
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

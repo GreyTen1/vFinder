@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, ChevronUp, RefreshCw, X } from "lucide-react";
 import { apiGetFilesByTag, apiOpenItem, apiReadDirectory } from "../api";
 import { FileEntry } from "../types";
 import type { SelectionModifiers } from "./Views";
+import { useMarqueeSelection } from "./Views";
 import { FileIcon } from "./FileIcon";
 
 interface PaneLocation {
@@ -23,10 +24,14 @@ interface SplitExplorerPaneProps {
     event: React.MouseEvent,
     entry: FileEntry,
     orderedEntries?: FileEntry[],
-    onClickOverride?: (entry: FileEntry, modifiers: SelectionModifiers) => void
+    onClickOverride?: (entry: FileEntry, modifiers: SelectionModifiers) => void,
+    selectedPathsOverride?: string[]
   ) => void;
   onClose: () => void;
   onLocationChange: (location: PaneLocation) => void;
+  onHoverChange: (hovered: boolean) => void;
+  onSelectionChange: (paths: string[]) => void;
+  onSelectAllChange: (selectAll: (() => void) | null) => void;
 }
 
 export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
@@ -40,13 +45,20 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   onStartItemDrag,
   onClose,
   onLocationChange,
+  onHoverChange,
+  onSelectionChange,
+  onSelectAllChange,
 }) => {
   const [history, setHistory] = useState<PaneLocation[]>([
     { path: initialPath, title: initialTitle, activeTag: initialTag },
   ]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const selectedPathsRef = useRef<string[]>([]);
+  selectedPathsRef.current = selectedPaths;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const selectionAnchorRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
@@ -77,11 +89,14 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
       .finally(() => {
         if (mounted && requestIdRef.current === requestId) setLoading(false);
       });
-    setSelectedPath(null);
+    selectedPathsRef.current = [];
+    setSelectedPaths([]);
+    onSelectionChange([]);
+    selectionAnchorRef.current = null;
     return () => {
       mounted = false;
     };
-  }, [location.path, location.activeTag, refreshVersion]);
+  }, [location.path, location.activeTag, refreshVersion, onSelectionChange]);
 
   const navigate = (entry: FileEntry) => {
     setHistory((prev) => [
@@ -139,6 +154,59 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
       });
   };
 
+  const getNextSelection = (
+    entry: FileEntry,
+    modifiers: SelectionModifiers
+  ) => {
+    if (modifiers.shift) {
+      const anchorPath =
+        selectionAnchorRef.current ||
+        selectedPathsRef.current[selectedPathsRef.current.length - 1] ||
+        entry.path;
+      const anchorIndex = entries.findIndex((item) => item.path === anchorPath);
+      const targetIndex = entries.findIndex((item) => item.path === entry.path);
+      if (anchorIndex >= 0 && targetIndex >= 0) {
+        const start = Math.min(anchorIndex, targetIndex);
+        const end = Math.max(anchorIndex, targetIndex);
+        const range = entries.slice(start, end + 1).map((item) => item.path);
+        return modifiers.ctrlKey
+          ? Array.from(new Set([...selectedPathsRef.current, ...range]))
+          : range;
+      }
+    }
+    if (modifiers.ctrlKey) {
+      return selectedPathsRef.current.includes(entry.path)
+        ? selectedPathsRef.current.filter((path) => path !== entry.path)
+        : [...selectedPathsRef.current, entry.path];
+    }
+    return [entry.path];
+  };
+
+  const setSelection = useCallback((paths: string[]) => {
+    selectedPathsRef.current = paths;
+    setSelectedPaths(paths);
+    onSelectionChange(paths);
+  }, [onSelectionChange]);
+  const clearSelection = useCallback(() => {
+    selectedPathsRef.current = [];
+    selectionAnchorRef.current = null;
+    setSelectedPaths([]);
+    onSelectionChange([]);
+  }, [onSelectionChange]);
+  const selectAll = useCallback(() => {
+    setSelection(entries.map((entry) => entry.path));
+  }, [entries, setSelection]);
+  useEffect(() => {
+    onSelectAllChange(selectAll);
+    return () => onSelectAllChange(null);
+  }, [onSelectAllChange, selectAll]);
+  const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
+    containerRef,
+    selectedPaths,
+    onSetSelection: setSelection,
+    onClearSelection: clearSelection,
+  });
+
   const buttonClass = darkMode
     ? "text-zinc-300 hover:bg-white/10 active:bg-white/15"
     : "text-zinc-700 hover:bg-black/5 active:bg-black/10";
@@ -149,6 +217,8 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
       data-split-pane="true"
       data-drop-path={location.activeTag ? undefined : location.path}
       data-drop-name={location.title}
+      onMouseEnter={() => onHoverChange(true)}
+      onMouseLeave={() => onHoverChange(false)}
       className={`flex min-w-0 flex-1 flex-col border-l ${
         darkMode ? "border-white/10 bg-[#202024]" : "border-black/10 bg-[#f2f2f5]"
       }`}
@@ -211,7 +281,11 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
         </button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto p-2">
+      <div
+        ref={containerRef}
+        onMouseDown={handleContainerMouseDown}
+        className="relative min-h-0 flex-1 overflow-auto p-2"
+      >
         {loading ? (
           <div className="flex h-full items-center justify-center text-xs opacity-50">
             Loading…
@@ -227,19 +301,46 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-1">
             {entries.map((entry) => {
-              const selected = selectedPath === entry.path;
+              const selected = selectedPaths.includes(entry.path);
               return (
                 <div
                   key={entry.path}
                   role="button"
                   tabIndex={0}
+                  data-entry-path={entry.path}
+                  data-drag-handle="true"
                   data-drop-path={entry.isDir ? entry.path : undefined}
                   data-drop-name={entry.isDir ? entry.name : undefined}
-                  onMouseDown={(event) =>
-                    onStartItemDrag(event, entry, entries, (clickedEntry) =>
-                      setSelectedPath(clickedEntry.path)
-                    )
-                  }
+                  onMouseDown={(event) => {
+                    const modifiers = {
+                      ctrlKey: event.ctrlKey,
+                      shift: event.shiftKey,
+                    };
+                    const currentSelection = selectedPathsRef.current;
+                    const wasSelected = currentSelection.includes(entry.path);
+                    const nextSelection =
+                      wasSelected && !modifiers.ctrlKey && !modifiers.shift
+                        ? currentSelection
+                        : getNextSelection(entry, modifiers);
+                    if (!modifiers.shift) selectionAnchorRef.current = entry.path;
+                    selectedPathsRef.current = nextSelection;
+                    setSelectedPaths(nextSelection);
+                    onSelectionChange(nextSelection);
+                    onStartItemDrag(
+                      event,
+                      entry,
+                      entries,
+                      () => {
+                        if (wasSelected && !modifiers.ctrlKey && !modifiers.shift) {
+                          const singleSelection = [entry.path];
+                          selectedPathsRef.current = singleSelection;
+                          setSelectedPaths(singleSelection);
+                          onSelectionChange(singleSelection);
+                        }
+                      },
+                      nextSelection
+                    );
+                  }}
                   onDoubleClick={() => void openEntry(entry)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
@@ -267,6 +368,18 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
               );
             })}
           </div>
+        )}
+        {marqueeRect && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute z-10 border border-[#0a84ff] bg-[#0a84ff]/15"
+            style={{
+              left: marqueeRect.left,
+              top: marqueeRect.top,
+              width: marqueeRect.width,
+              height: marqueeRect.height,
+            }}
+          />
         )}
       </div>
       <footer

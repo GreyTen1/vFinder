@@ -1048,12 +1048,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         {splitTab && splitTabLeft !== null && (
           <div
             className="absolute bottom-0 top-0 z-20 flex items-end"
-            style={{ left: `${splitTabLeft}px` }}
+            style={{ left: `${splitTabLeft}px`, right: 0 }}
           >
             <div
               ref={splitTabElementRef}
               key={splitTab.id}
-              className={`workspace-tab-active ${darkMode ? "workspace-tab-active-dark" : "workspace-tab-active-light"} group relative z-20 flex h-8 max-w-[220px] shrink-0 translate-y-[2px] items-center gap-2 rounded-t-xl rounded-b-none border pl-3 pr-2 text-[11px] font-medium ${
+              className={`workspace-tab-active ${darkMode ? "workspace-tab-active-dark" : "workspace-tab-active-light"} group relative z-20 flex h-8 min-w-[88px] flex-[1_1_220px] max-w-[260px] translate-y-[2px] items-center gap-1.5 rounded-t-xl rounded-b-none border pl-2.5 pr-1.5 text-[11px] font-medium ${
                 darkMode
                   ? "border-white/10 border-b-0 bg-[#202024] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
                   : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"

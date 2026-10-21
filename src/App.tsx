@@ -228,6 +228,15 @@ export const App: React.FC = () => {
     activeTag: string | null;
     key: number;
   } | null>(null);
+  const splitPaneHoveredRef = useRef(false);
+  const splitPaneSelectedPathsRef = useRef<string[]>([]);
+  const splitPaneSelectAllRef = useRef<(() => void) | null>(null);
+  const closeSplitPane = useCallback(() => {
+    splitPaneHoveredRef.current = false;
+    splitPaneSelectedPathsRef.current = [];
+    splitPaneSelectAllRef.current = null;
+    setSplitPane(null);
+  }, []);
   const appShellRef = useRef<HTMLDivElement>(null);
   const primaryPaneRef = useRef<HTMLDivElement>(null);
   const splitContentRef = useRef<HTMLDivElement>(null);
@@ -1073,6 +1082,19 @@ export const App: React.FC = () => {
     []
   );
 
+  const handleSplitPaneHoverChange = useCallback((hovered: boolean) => {
+    splitPaneHoveredRef.current = hovered;
+  }, []);
+  const handleSplitPaneSelectionChange = useCallback((paths: string[]) => {
+    splitPaneSelectedPathsRef.current = paths;
+  }, []);
+  const handleSplitPaneSelectAllChange = useCallback(
+    (selectAll: (() => void) | null) => {
+      splitPaneSelectAllRef.current = selectAll;
+    },
+    []
+  );
+
   const handleNewTab = useCallback(
     (initialPath?: string, initialTitle?: string) => {
       const validPath =
@@ -1472,7 +1494,11 @@ export const App: React.FC = () => {
 
   const handleCopy = useCallback(
     (entry?: FileEntry) => {
-      const paths = entry ? [entry.path] : selectedPaths;
+      const paths = entry
+        ? [entry.path]
+        : splitPaneHoveredRef.current
+        ? splitPaneSelectedPathsRef.current
+        : selectedPaths;
       if (paths.length === 0) return;
       setClipboard({ paths, mode: "copy" });
       showToast(`Copied ${paths.length} item(s)`);
@@ -1482,7 +1508,11 @@ export const App: React.FC = () => {
 
   const handleCut = useCallback(
     (entry?: FileEntry) => {
-      const paths = entry ? [entry.path] : selectedPaths;
+      const paths = entry
+        ? [entry.path]
+        : splitPaneHoveredRef.current
+        ? splitPaneSelectedPathsRef.current
+        : selectedPaths;
       if (paths.length === 0) return;
       setClipboard({ paths, mode: "cut" });
       showToast(`Cut ${paths.length} item(s)`);
@@ -1653,7 +1683,8 @@ export const App: React.FC = () => {
       onClickOverride?: (
         entry: FileEntry,
         modifiers: SelectionModifiers
-      ) => void
+      ) => void,
+      selectedPathsOverride?: string[]
     ) => {
       if (e.button !== 0) return;
       const target = e.target as HTMLElement;
@@ -1669,7 +1700,7 @@ export const App: React.FC = () => {
       const shift = e.shiftKey;
 
       const currentSelected = startedInSplitPane
-        ? [entry.path]
+        ? selectedPathsOverride || [entry.path]
         : selectedPathsRef.current;
       const alreadySelected = currentSelected.includes(entry.path);
 
@@ -1681,8 +1712,10 @@ export const App: React.FC = () => {
         dragPaths = [...currentSelected, entry.path];
       } else {
         // Select immediately on mousedown so single un-selected item highlights right away
-        setSelectedPaths([entry.path]);
-        lastSelectedPathRef.current = entry.path;
+        if (!startedInSplitPane) {
+          setSelectedPaths([entry.path]);
+          lastSelectedPathRef.current = entry.path;
+        }
         dragPaths = [entry.path];
       }
 
@@ -1824,7 +1857,7 @@ export const App: React.FC = () => {
         const dist = Math.hypot(ev.clientX - startX, ev.clientY - startY);
         if (!isDragging && dist > 5) {
           isDragging = true;
-          setSelectedPaths(dragPaths);
+          if (!startedInSplitPane) setSelectedPaths(dragPaths);
           cancelInternalDragRef.current = cancelInternalDrag;
           void apiArmExternalDrag(dragPaths);
         }
@@ -2696,7 +2729,11 @@ export const App: React.FC = () => {
       // Ctrl + A -> Select All items in current folder
       if (cmdOrCtrl && e.key.toLowerCase() === "a") {
         e.preventDefault();
-        setSelectedPaths(sortedEntries.map((item) => item.path));
+        if (splitPaneHoveredRef.current && splitPaneSelectAllRef.current) {
+          splitPaneSelectAllRef.current();
+        } else {
+          setSelectedPaths(sortedEntries.map((item) => item.path));
+        }
         return;
       }
 
@@ -2973,7 +3010,9 @@ export const App: React.FC = () => {
       }
       if (cmdOrCtrl && e.key.toLowerCase() === "v") {
         e.preventDefault();
-        handlePaste();
+        handlePaste(
+          splitPaneHoveredRef.current ? splitPane?.path : undefined
+        );
         return;
       }
       if (cmdOrCtrl && e.key.toLowerCase() === "d" && selectedPaths.length > 0) {
@@ -3010,6 +3049,7 @@ export const App: React.FC = () => {
     handleCopy,
     handleCut,
     handlePaste,
+    splitPane,
     handleDuplicate,
     handleTrash,
     showToast,
@@ -3157,7 +3197,11 @@ export const App: React.FC = () => {
     onContextMenu: handleContextMenu,
     onStartItemDrag: handleStartItemDrag,
     dropTargetPath: activeDropTargetPath,
-    draggedPaths: dragState?.paths || [],
+    // Cut items share the subdued treatment used for actively dragged items.
+    draggedPaths: [
+      ...(dragState?.paths || []),
+      ...(clipboard?.mode === "cut" ? clipboard.paths : []),
+    ],
     refreshVersion,
     renamingPath,
     renameValue,
@@ -3288,7 +3332,7 @@ export const App: React.FC = () => {
         onSplitTab={handleSplitTab}
         onCloseSplitPane={() => {
           if (splitPane) handleCloseTab(splitPane.tabId);
-          setSplitPane(null);
+          closeSplitPane();
         }}
         onReorderTabs={handleReorderTabs}
         onNewTab={handleNewTab}
@@ -3400,8 +3444,11 @@ export const App: React.FC = () => {
                 onStartItemDrag={handleStartItemDrag}
                 dropTargetPath={activeDropTargetPath}
                 panelWidthPercent={splitPaneRatio * 100}
-                onClose={() => setSplitPane(null)}
+                onClose={closeSplitPane}
                 onLocationChange={handleSplitPaneLocationChange}
+                onHoverChange={handleSplitPaneHoverChange}
+                onSelectionChange={handleSplitPaneSelectionChange}
+                onSelectAllChange={handleSplitPaneSelectAllChange}
               />
             )}
             {splitPane && (

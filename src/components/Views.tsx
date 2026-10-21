@@ -74,7 +74,7 @@ interface MarqueeRect {
  * Reusable hook for macOS Finder rubber-band (marquee) cursor selection
  * inside a scrollable view container, including auto-scrolling on edges.
  */
-function useMarqueeSelection({
+export function useMarqueeSelection({
   containerRef,
   selectedPaths,
   onSetSelection,
