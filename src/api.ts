@@ -161,8 +161,8 @@ export async function apiReadFilePreview(
   return invoke<FilePreview>("read_file_preview", { path, maxBytes });
 }
 
-export async function apiGetVideoPreviewUrl(path: string): Promise<string> {
-  return invoke<string>("get_video_preview_url", { path });
+export async function apiGetFilePreviewUrl(path: string): Promise<string> {
+  return invoke<string>("get_file_preview_url", { path });
 }
 
 export async function apiSearchDirectory(

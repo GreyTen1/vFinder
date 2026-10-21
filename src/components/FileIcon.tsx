@@ -480,7 +480,7 @@ const ImageFileIcon: React.FC<{
             draggable={false}
             onError={handleImgError}
             style={{ filter: "drop-shadow(0 2px 5px rgba(0, 0, 0, 0.55))" }}
-            className="w-full h-full object-cover rounded-[3px] shadow-md pointer-events-none"
+            className="w-full h-full object-cover shadow-md pointer-events-none"
           />
         ) : (
           <div className="w-full h-full p-[3px] flex items-center justify-center">
@@ -492,7 +492,7 @@ const ImageFileIcon: React.FC<{
               draggable={false}
               onError={handleImgError}
               style={{ filter: "drop-shadow(0 3px 7px rgba(0, 0, 0, 0.6))" }}
-              className="max-w-full max-h-full object-contain rounded-[4px] shadow-lg pointer-events-none"
+              className="max-w-full max-h-full object-contain shadow-lg pointer-events-none"
             />
           </div>
         )}

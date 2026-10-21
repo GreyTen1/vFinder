@@ -3206,6 +3206,7 @@ export const App: React.FC = () => {
     renamingPath,
     renameValue,
     onRenameChange: setRenameValue,
+    onStartRename: startRename,
     onRenameSubmit: submitRename,
     onRenameCancel: handleCancelRename,
     darkMode,

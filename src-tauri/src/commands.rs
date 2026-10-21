@@ -1961,12 +1961,12 @@ pub async fn set_default_app(
 }
 
 #[tauri::command]
-pub fn get_video_preview_url(path: String) -> Result<String, String> {
+pub fn get_file_preview_url(path: String) -> Result<String, String> {
     let file_path = Path::new(&path);
     if !file_path.is_file() {
-        return Err("Video file no longer exists".to_string());
+        return Err("Preview file no longer exists".to_string());
     }
-    crate::download_server::register_video_preview(file_path)
+    crate::download_server::register_file_preview(file_path)
 }
 
 #[tauri::command]
@@ -2011,6 +2011,7 @@ pub async fn read_file_preview(
             ext,
             "mp4" | "m4v" | "mkv" | "mov" | "webm" | "avi" | "mpeg" | "mpg" | "3gp"
         ) || entry.mime_type.starts_with("video/");
+        let is_pdf = ext == "pdf" || entry.mime_type == "application/pdf";
 
         if is_image && entry.size <= 15 * 1024 * 1024 {
             let bytes = fs::read(p).map_err(|e| e.to_string())?;
@@ -2051,6 +2052,25 @@ pub async fn read_file_preview(
                 is_dir: false,
                 child_count: None,
                 preview_type: "video".to_string(),
+                text_content: None,
+                data_url: None,
+                truncated: false,
+            });
+        }
+
+        if is_pdf {
+            return Ok(FilePreview {
+                path: entry.path,
+                name: entry.name,
+                kind: entry.kind,
+                mime_type: "application/pdf".to_string(),
+                size: entry.size,
+                modified: entry.modified,
+                created: entry.created,
+                permissions: entry.permissions,
+                is_dir: false,
+                child_count: None,
+                preview_type: "pdf".to_string(),
                 text_content: None,
                 data_url: None,
                 truncated: false,

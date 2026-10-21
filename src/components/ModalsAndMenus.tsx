@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   X,
   ExternalLink,
@@ -37,7 +37,7 @@ import {
   formatMacDate,
 } from "../types";
 import { FileIcon } from "./FileIcon";
-import { apiReadFilePreview, apiGetVideoPreviewUrl, apiGetAvailableFormatTypes } from "../api";
+import { apiReadFilePreview, apiGetFilePreviewUrl, apiGetAvailableFormatTypes } from "../api";
 import { useToolbarOutsideDismiss } from "./useToolbarOutsideDismiss";
 
 /* ============================================================================
@@ -64,7 +64,7 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
   const dialogRef = useRef<HTMLDivElement>(null);
   useToolbarOutsideDismiss(dialogRef, Boolean(entry), onClose);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!entry) return;
     let cancelled = false;
     setLoading(true);
@@ -88,14 +88,14 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
   }, [entry?.path]);
 
   useEffect(() => {
-    if (!entry || preview?.previewType !== "video") return;
+    if (!entry || (preview?.previewType !== "video" && preview?.previewType !== "pdf")) return;
     let cancelled = false;
-    apiGetVideoPreviewUrl(entry.path)
+    apiGetFilePreviewUrl(entry.path)
       .then((url) => {
         if (!cancelled) setVideoUrl(url);
       })
       .catch((error) => {
-        if (!cancelled) setVideoError(`Could not prepare local video stream: ${String(error)}`);
+        if (!cancelled) setVideoError(`Could not prepare local preview: ${String(error)}`);
       });
     return () => {
       cancelled = true;
@@ -167,6 +167,17 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
               alt={entry.name}
               className="max-h-full max-w-full object-contain rounded-lg shadow-lg"
             />
+          ) : preview?.previewType === "pdf" ? (
+            videoUrl ? (
+              <iframe
+                key={entry.path}
+                src={videoUrl}
+                title={`PDF preview: ${entry.name}`}
+                className="h-full w-full rounded-lg bg-white shadow-lg"
+              />
+            ) : (
+              <div className="text-xs opacity-50">{videoError || "Preparing PDF preview..."}</div>
+            )
           ) : preview?.previewType === "video" ? (
             <div className="flex max-h-full max-w-full flex-col items-center gap-2">
               {!videoUrl && videoError === null && (

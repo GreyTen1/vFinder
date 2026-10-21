@@ -142,6 +142,7 @@ pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
     let _ = window.with_webview(move |webview| {
         use gtk::glib::object::ObjectType;
         use gtk::prelude::*;
+        use webkit2gtk::{SettingsExt, WebViewExt};
         use std::ffi::c_void;
 
         extern "C" {
@@ -163,6 +164,19 @@ pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
 
         let wv = webview.inner();
         let wv_ptr = wv.as_ptr() as *mut c_void;
+
+        if std::env::var_os("VFINDER_WEBVIEW_DEBUG").is_some() {
+            if let Some(settings) = WebViewExt::settings(&wv) {
+                settings.set_enable_write_console_messages_to_stdout(true);
+            }
+            wv.connect_load_failed(|_, event, uri, error| {
+                eprintln!("[webview] Load failed at {event:?} for {uri}: {error}");
+                false
+            });
+            wv.connect_web_process_terminated(|_, reason| {
+                eprintln!("[webview] Web process terminated: {reason:?}");
+            });
+        }
 
         unsafe {
             // WebKitWebViewBase stores its internal GtkGestureZoom under "wk-view-zoom-gesture".
@@ -384,7 +398,7 @@ fn main() {
             commands::open_item_with,
             commands::set_default_app,
             commands::read_file_preview,
-            commands::get_video_preview_url,
+            commands::get_file_preview_url,
             commands::search_directory,
             commands::toggle_item_tag,
             commands::get_files_by_tag,

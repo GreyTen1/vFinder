@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -9,13 +9,14 @@ use tauri::{AppHandle, Emitter, Manager};
 static PENDING_DOWNLOADS_BY_WINDOW: OnceLock<Mutex<HashMap<String, Vec<InterceptedDownloadPayload>>>> = OnceLock::new();
 static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
 static INITIAL_DOWNLOAD_CLAIMED: AtomicBool = AtomicBool::new(false);
-static VIDEO_PREVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
-static VIDEO_PREVIEWS: OnceLock<Mutex<HashMap<String, (PathBuf, std::time::Instant)>>> = OnceLock::new();
+static FILE_PREVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
+static DOWNLOAD_SERVER_PORT: AtomicU16 = AtomicU16::new(0);
+static FILE_PREVIEWS: OnceLock<Mutex<HashMap<String, (PathBuf, std::time::Instant)>>> = OnceLock::new();
 
-pub fn register_video_preview(path: &Path) -> Result<String, String> {
+pub fn register_file_preview(path: &Path) -> Result<String, String> {
     let canonical_path = path.canonicalize().map_err(|e| e.to_string())?;
     if !canonical_path.is_file() {
-        return Err("Video file does not exist".to_string());
+        return Err("Preview file does not exist".to_string());
     }
 
     let mut random = [0u8; 24];
@@ -31,14 +32,18 @@ pub fn register_video_preview(path: &Path) -> Result<String, String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or_default(),
-            VIDEO_PREVIEW_COUNTER.fetch_add(1, Ordering::Relaxed)
+            FILE_PREVIEW_COUNTER.fetch_add(1, Ordering::Relaxed)
         )
     };
-    let previews = VIDEO_PREVIEWS.get_or_init(|| Mutex::new(HashMap::new()));
+    let previews = FILE_PREVIEWS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut previews = previews.lock().map_err(|_| "Preview registry unavailable".to_string())?;
     previews.retain(|_, (_, created)| created.elapsed() < Duration::from_secs(2 * 60 * 60));
     previews.insert(token.clone(), (canonical_path, std::time::Instant::now()));
-    Ok(format!("http://127.0.0.1:45456/preview/video?token={token}"))
+    let port = DOWNLOAD_SERVER_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("Local preview server is not ready".to_string());
+    }
+    Ok(format!("http://127.0.0.1:{port}/preview/file?token={token}"))
 }
 
 pub fn add_pending_download_for_window(window_label: &str, payload: InterceptedDownloadPayload) {
@@ -216,20 +221,40 @@ pub fn register_native_messaging_host() {
 
 pub fn start_download_server(app_handle: AppHandle) {
     register_native_messaging_host();
-    std::thread::spawn(move || {
-        let port = 45456;
-        let addr = format!("127.0.0.1:{}", port);
-        let listener = match TcpListener::bind(&addr) {
-            Ok(l) => {
-                println!("[download_server] Listening on http://{}", addr);
-                l
+    let listener = match TcpListener::bind("127.0.0.1:45456") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            match TcpListener::bind("127.0.0.1:0") {
+                Ok(listener) => {
+                    eprintln!(
+                        "[download_server] Port 45456 is occupied; using {} for this instance",
+                        listener.local_addr().map(|addr| addr.to_string()).unwrap_or_default()
+                    );
+                    listener
+                }
+                Err(fallback_error) => {
+                    eprintln!("[download_server] Could not bind a local port: {fallback_error}");
+                    return;
+                }
             }
-            Err(e) => {
-                eprintln!("[download_server] Failed to bind {}: {}", addr, e);
-                return;
-            }
-        };
+        }
+        Err(error) => {
+            eprintln!("[download_server] Could not bind 127.0.0.1:45456: {error}");
+            return;
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(error) => {
+            eprintln!("[download_server] Could not read local server address: {error}");
+            return;
+        }
+    };
+    DOWNLOAD_SERVER_PORT.store(port, Ordering::Release);
+    let addr = format!("127.0.0.1:{port}");
+    println!("[download_server] Listening on http://{addr}");
 
+    std::thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => {
@@ -286,8 +311,8 @@ fn handle_client(stream: &mut TcpStream, app: &AppHandle) {
         }
     }
 
-    if (method == "GET" || method == "HEAD") && path.starts_with("/preview/video?") {
-        serve_video_preview(stream, path, method == "HEAD", range_header.as_deref());
+    if (method == "GET" || method == "HEAD") && path.starts_with("/preview/file?") {
+        serve_file_preview(stream, path, method == "HEAD", range_header.as_deref());
         return;
     }
 
@@ -454,12 +479,12 @@ Connection: close\r\n\
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn serve_video_preview(stream: &mut TcpStream, request_path: &str, head_only: bool, range: Option<&str>) {
+fn serve_file_preview(stream: &mut TcpStream, request_path: &str, head_only: bool, range: Option<&str>) {
     let token = request_path
         .split_once("token=")
         .map(|(_, value)| value.split('&').next().unwrap_or_default())
         .unwrap_or_default();
-    let path = VIDEO_PREVIEWS
+    let path = FILE_PREVIEWS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .ok()

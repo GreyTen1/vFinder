@@ -15,7 +15,7 @@ import {
   formatMacDate,
 } from "../types";
 import { FileIcon, markFolderAnimationActive } from "./FileIcon";
-import { apiReadDirectory, apiReadFilePreview } from "../api";
+import { apiGetFilePreviewUrl, apiReadDirectory, apiReadFilePreview } from "../api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 export interface SelectionModifiers {
@@ -51,6 +51,7 @@ export interface CommonViewProps {
   renamingPath: string | null;
   renameValue: string;
   onRenameChange: (val: string) => void;
+  onStartRename: (entry: FileEntry) => void;
   onRenameSubmit: () => void;
   onRenameCancel: () => void;
   darkMode: boolean;
@@ -402,6 +403,7 @@ interface IconViewItemProps {
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   onStartItemDrag: (e: React.MouseEvent, entry: FileEntry) => void;
   onRenameChange: (val: string) => void;
+  onStartRename: (entry: FileEntry) => void;
   onRenameSubmit: () => void;
   onRenameCancel: () => void;
 }
@@ -420,6 +422,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
     onContextMenu,
     onStartItemDrag,
     onRenameChange,
+    onStartRename,
     onRenameSubmit,
     onRenameCancel,
   }) => {
@@ -465,12 +468,22 @@ const IconViewItem = React.memo<IconViewItemProps>(
 
         {/* Label pill */}
         {isRenaming ? (
-          <input
+          <textarea
             data-rename-input
             autoFocus
-            onFocus={(e) => e.target.select()}
+            rows={1}
+            wrap="soft"
+            onFocus={(e) => {
+              e.target.select();
+              e.target.style.height = "auto";
+              e.target.style.height = `${e.target.scrollHeight}px`;
+            }}
             value={renameValue}
-            onChange={(e) => onRenameChange(e.target.value)}
+            onChange={(e) => {
+              onRenameChange(e.target.value);
+              e.target.style.height = "auto";
+              e.target.style.height = `${e.target.scrollHeight}px`;
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") onRenameSubmit();
               if (e.key === "Escape") onRenameCancel();
@@ -481,14 +494,22 @@ const IconViewItem = React.memo<IconViewItemProps>(
             style={{
               fontSize: "12px",
               lineHeight: "1.25",
-              color: isSelected ? (darkMode ? "rgba(255,255,255,.9)" : "#18181b") : undefined,
+              color: isSelected
+                ? darkMode
+                  ? "rgba(255,255,255,.9)"
+                  : "#18181b"
+                : undefined,
             }}
-            className="mt-1.5 w-full min-w-0 text-center leading-tight px-2 py-0.5 rounded-md bg-transparent border-0 outline-none shadow-none focus:ring-0"
+            className="mt-1.5 block w-full min-w-0 max-w-full resize-none overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere] px-2 py-0.5 text-center leading-tight rounded-md bg-transparent border-0 outline-none shadow-none focus:ring-0"
           />
         ) : (
           <div
             data-drag-handle="true"
             onMouseDown={(e) => onStartItemDrag(e, entry)}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              onStartRename(entry);
+            }}
             onClick={(e) => e.stopPropagation()}
             className={`mt-1.5 px-2 py-0.5 rounded-md text-[12px] leading-tight text-center max-w-full flex items-center justify-center gap-1 ${
               isDropTarget || isSelected
@@ -525,6 +546,7 @@ export const IconView: React.FC<CommonViewProps> = ({
   renamingPath,
   renameValue,
   onRenameChange,
+  onStartRename,
   onRenameSubmit,
   onRenameCancel,
   darkMode,
@@ -598,6 +620,7 @@ export const IconView: React.FC<CommonViewProps> = ({
               onContextMenu={onContextMenu}
               onStartItemDrag={handleStartDragBound}
               onRenameChange={onRenameChange}
+              onStartRename={onStartRename}
               onRenameSubmit={onRenameSubmit}
               onRenameCancel={onRenameCancel}
             />
@@ -1829,6 +1852,7 @@ export const ColumnView: React.FC<
 
   const [activeColIndex, setActiveColIndex] = useState<number>(0);
   const [preview, setPreview] = useState<FilePreview | null>(null);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<{ path: string; url: string } | null>(null);
   const zoomScale = iconSize / 64;
   const inspectorIconSize = Math.max(
     56,
@@ -1972,6 +1996,21 @@ export const ColumnView: React.FC<
       ? columns[columns.length - 1].selectedEntry
       : null;
 
+  useEffect(() => {
+    if (!activeFile || preview?.previewType !== "pdf") {
+      setPdfPreviewUrl(null);
+      return;
+    }
+    let cancelled = false;
+    setPdfPreviewUrl(null);
+    apiGetFilePreviewUrl(activeFile.path).then((url) => {
+      if (!cancelled) setPdfPreviewUrl({ path: activeFile.path, url });
+    }).catch(() => {
+      if (!cancelled) setPdfPreviewUrl(null);
+    });
+    return () => { cancelled = true; };
+  }, [activeFile?.path, preview?.previewType]);
+
   return (
     <div
       data-tab-scroll-view="columns"
@@ -2020,6 +2059,12 @@ export const ColumnView: React.FC<
                 alt={activeFile.name}
                 style={{ maxHeight: inspectorImgMaxH }}
                 className="rounded-lg shadow-md object-contain mb-3 border border-white/10"
+              />
+            ) : preview?.previewType === "pdf" && pdfPreviewUrl?.path === activeFile.path ? (
+              <iframe
+                src={pdfPreviewUrl.url}
+                title={`PDF preview: ${activeFile.name}`}
+                className="mb-3 h-48 w-full rounded-lg bg-white shadow-md"
               />
             ) : preview?.previewType === "text" && preview.textContent ? (
               <pre
@@ -2143,6 +2188,9 @@ export const GalleryView: React.FC<CommonViewProps> = ({
     [entries, selectedSet]
   );
   const [preview, setPreview] = useState<FilePreview | null>(null);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [videoUrl, setVideoUrl] = useState<{ path: string; url: string } | null>(null);
+  const [videoStreamError, setVideoStreamError] = useState<{ path: string; message: string } | null>(null);
 
   const ext = (activeEntry?.extension || "").toLowerCase();
   const isImage =
@@ -2156,6 +2204,9 @@ export const GalleryView: React.FC<CommonViewProps> = ({
     !activeEntry?.isDir &&
     (Boolean(activeEntry?.mimeType?.startsWith("video/")) ||
       ["mp4", "m4v", "mkv", "mov", "webm", "avi", "mpeg", "mpg", "3gp"].includes(ext));
+  const isPdf = Boolean(activeEntry) && !activeEntry?.isDir &&
+    (activeEntry?.mimeType === "application/pdf" || ext === "pdf");
+  const needsStreamPreview = isVideo || isPdf;
 
   const activeImageSrc = useMemo(() => {
     if (!isImage || !activeEntry?.path) return null;
@@ -2169,13 +2220,18 @@ export const GalleryView: React.FC<CommonViewProps> = ({
   useEffect(() => {
     if (!activeEntry || activeEntry.isDir || isImage) {
       setPreview(null);
+      setPreviewPath(null);
       return;
     }
     let cancelled = false;
     setPreview(null);
+    setPreviewPath(null);
     apiReadFilePreview(activeEntry.path, 32768)
       .then((result) => {
-        if (!cancelled) setPreview(result);
+        if (!cancelled) {
+          setPreview(result);
+          setPreviewPath(activeEntry.path);
+        }
       })
       .catch(() => {
         if (!cancelled) setPreview(null);
@@ -2184,6 +2240,35 @@ export const GalleryView: React.FC<CommonViewProps> = ({
       cancelled = true;
     };
   }, [activeEntry?.path, isImage, isVideo]);
+
+  useEffect(() => {
+    if (!activeEntry || !needsStreamPreview) {
+      setVideoUrl(null);
+      setVideoStreamError(null);
+      return;
+    }
+    let cancelled = false;
+    setVideoUrl(null);
+    setVideoStreamError(null);
+    apiGetFilePreviewUrl(activeEntry.path)
+      .then((url) => {
+        if (!cancelled) setVideoUrl({ path: activeEntry.path, url });
+      })
+      .catch((error) => {
+        if (!cancelled) setVideoStreamError({ path: activeEntry.path, message: String(error) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeEntry?.path, needsStreamPreview]);
+
+  const currentVideoUrl =
+    videoUrl && videoUrl.path === activeEntry?.path ? videoUrl.url : null;
+  const currentVideoError =
+    videoStreamError && videoStreamError.path === activeEntry?.path
+      ? videoStreamError.message
+      : null;
+  const currentPreview = previewPath === activeEntry?.path ? preview : null;
 
   if (!activeEntry) {
     return (
@@ -2213,19 +2298,40 @@ export const GalleryView: React.FC<CommonViewProps> = ({
               style={{ transform: `scale(${stageImgScale})` }}
               className="max-h-full max-w-full rounded-xl shadow-2xl object-contain transition-transform duration-150"
             />
-          ) : preview?.previewType === "video" ? (
-            <video
-              key={activeEntry.path}
-              src={convertFileSrc(activeEntry.path)}
-              controls
-              playsInline
-              preload="metadata"
-              onMouseDown={(event) => event.stopPropagation()}
-              onDoubleClick={(event) => event.stopPropagation()}
-              className="max-h-full max-w-full rounded-xl bg-black shadow-2xl"
-              aria-label={`Video preview: ${activeEntry.name}`}
-            />
-          ) : preview?.previewType === "text" && preview.textContent ? (
+          ) : currentPreview?.previewType === "pdf" ? (
+            currentVideoUrl ? (
+              <iframe
+                key={activeEntry.path}
+                src={currentVideoUrl}
+                title={`PDF preview: ${activeEntry.name}`}
+                onMouseDown={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                className="h-full w-full rounded-xl bg-white shadow-2xl"
+              />
+            ) : (
+              <div className="text-xs opacity-50">
+                {currentVideoError ? `Could not load PDF preview: ${currentVideoError}` : "Preparing PDF preview..."}
+              </div>
+            )
+          ) : currentPreview?.previewType === "video" ? (
+            currentVideoUrl ? (
+              <video
+                key={activeEntry.path}
+                src={currentVideoUrl}
+                controls
+                playsInline
+                preload="metadata"
+                onMouseDown={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                className="max-h-full max-w-full rounded-xl bg-black shadow-2xl"
+                aria-label={`Video preview: ${activeEntry.name}`}
+              />
+            ) : (
+              <div className="text-xs opacity-50">
+                {currentVideoError ? `Could not load video preview: ${currentVideoError}` : "Preparing video preview..."}
+              </div>
+            )
+          ) : currentPreview?.previewType === "text" && currentPreview.textContent ? (
             <pre
               style={{
                 fontSize: `${Math.max(10, Math.min(16, Math.round(12 * zoomScale)))}px`,
@@ -2236,7 +2342,7 @@ export const GalleryView: React.FC<CommonViewProps> = ({
                   : "bg-white border-black/10 text-zinc-800"
               }`}
             >
-              {preview.textContent}
+              {currentPreview.textContent}
             </pre>
           ) : (
             <div className="flex flex-col items-center">
