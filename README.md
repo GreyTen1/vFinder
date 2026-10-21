@@ -15,6 +15,10 @@ A file explorer written in TypeScript, TailWind, and Rust
 It looks cool! currently, there are many other incredible good options around here, but none of them looks like macos' file explorer (finder)
 Altough It's way far from perfect right now, I believe it can be a usable daily driver for those who enjoy this aesthetic 
 
+### IMPORTANT!!! ###
+1. If you want to use apple's fonts, you have to obtain them from their official website, however, fallback fonts that are commonly bundled in Linux distros are included
+2. Optionally, this program includes a download manager function, which you can use by executing a small .sh script and installing a chrome extension which intercepts downloads (yeah, quite messy, oh, and for now it only works for edge, chrome, and Brave)
+
 ## Features? ##
 
 - Drag & Drop between programs
@@ -24,7 +28,7 @@ Altough It's way far from perfect right now, I believe it can be a usable daily 
 
 ## Compatible distros ##
 
-Ubuntu (26.04,25.04,24,04) 
+Ubuntu (26.04 LTS, 25.04 LTS, 24,04 LTS) 
 
 Dependencies:
 
