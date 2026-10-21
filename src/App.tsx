@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -50,6 +50,7 @@ import {
   apiGetPendingDownloads,
 } from "./api";
 import { Toolbar } from "./components/Toolbar";
+import { SplitExplorerPane } from "./components/SplitExplorerPane";
 import { Sidebar } from "./components/Sidebar";
 import { FileIcon } from "./components/FileIcon";
 import {
@@ -137,22 +138,154 @@ const DEFAULT_ZOOM_BY_VIEW: Record<ViewMode, number> = {
   gallery: 64,
 };
 
-export const App: React.FC = () => {
-  const [sidebarData, setSidebarData] = useState<SidebarData | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [darkMode, setDarkMode] = useState(true);
-
-  const [tabs, setTabs] = useState<FinderTab[]>([
-    {
+function getInitialFinderTab(): FinderTab {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("vfinder_detached") !== "1") {
+    return {
       id: "tab-1",
       title: "Home",
       path: "",
       history: [""],
       historyIndex: 0,
       activeTag: null,
+    };
+  }
+
+  const path = params.get("vfinder_path") || "";
+  return {
+    id: "tab-1",
+    title: params.get("vfinder_title") || folderDisplayName(path),
+    path,
+    history: [path],
+    historyIndex: 0,
+    activeTag: params.get("vfinder_tag"),
+  };
+}
+
+export const App: React.FC = () => {
+  const [sidebarData, setSidebarData] = useState<SidebarData | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarLayoutOpen, setSidebarLayoutOpen] = useState(true);
+  const sidebarCollapseTimerRef = useRef<number | null>(null);
+  const sidebarExpandFrameRef = useRef<number | null>(null);
+  const finishSidebarCollapse = useCallback(() => {
+    if (sidebarOpen) return;
+    if (sidebarCollapseTimerRef.current !== null) {
+      window.clearTimeout(sidebarCollapseTimerRef.current);
+      sidebarCollapseTimerRef.current = null;
+    }
+    setSidebarLayoutOpen(false);
+  }, [sidebarOpen]);
+  const toggleSidebar = useCallback(() => {
+    if (sidebarCollapseTimerRef.current !== null) {
+      window.clearTimeout(sidebarCollapseTimerRef.current);
+      sidebarCollapseTimerRef.current = null;
+    }
+    if (sidebarExpandFrameRef.current !== null) {
+      cancelAnimationFrame(sidebarExpandFrameRef.current);
+      sidebarExpandFrameRef.current = null;
+    }
+    if (sidebarOpen) {
+      setSidebarOpen(false);
+      sidebarCollapseTimerRef.current = window.setTimeout(() => {
+        setSidebarLayoutOpen(false);
+        sidebarCollapseTimerRef.current = null;
+      }, 320);
+    } else {
+      setSidebarLayoutOpen(true);
+      sidebarExpandFrameRef.current = requestAnimationFrame(() => {
+        setSidebarOpen(true);
+        sidebarExpandFrameRef.current = null;
+      });
+    }
+  }, [sidebarOpen]);
+
+  useEffect(
+    () => () => {
+      if (sidebarCollapseTimerRef.current !== null) {
+        window.clearTimeout(sidebarCollapseTimerRef.current);
+      }
+      if (sidebarExpandFrameRef.current !== null) {
+        cancelAnimationFrame(sidebarExpandFrameRef.current);
+      }
     },
-  ]);
+    []
+  );
+  const [darkMode, setDarkMode] = useState(true);
+
+  const [tabs, setTabs] = useState<FinderTab[]>(() => [getInitialFinderTab()]);
   const [activeTabId, setActiveTabId] = useState("tab-1");
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  const tabScrollPositionsRef = useRef(
+    new Map<string, { top: number; left: number }>()
+  );
+  const restoringTabScrollRef = useRef(false);
+  const [splitPane, setSplitPane] = useState<{
+    tabId: string;
+    path: string;
+    title: string;
+    activeTag: string | null;
+    key: number;
+  } | null>(null);
+  const appShellRef = useRef<HTMLDivElement>(null);
+  const primaryPaneRef = useRef<HTMLDivElement>(null);
+  const splitContentRef = useRef<HTMLDivElement>(null);
+  const [splitTabLeft, setSplitTabLeft] = useState<number | null>(null);
+  const [splitPaneRatio, setSplitPaneRatio] = useState(0.5);
+  const [splitPaneRefreshVersion, setSplitPaneRefreshVersion] = useState(0);
+
+  const handleSplitResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleSplitResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const bounds = splitContentRef.current?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0) return;
+    const minRatio = Math.min(0.5, 280 / bounds.width);
+    const rightRatio = (bounds.right - event.clientX) / bounds.width;
+    const nextRatio = Math.max(minRatio, Math.min(1 - minRatio, rightRatio));
+    setSplitPaneRatio(nextRatio);
+    const shell = appShellRef.current;
+    if (shell) {
+      const dividerX = bounds.right - nextRatio * bounds.width;
+      const left = dividerX - shell.getBoundingClientRect().left - shell.clientLeft;
+      setSplitTabLeft(left);
+    }
+  };
+
+  useLayoutEffect(() => {
+    if (!splitPane) {
+      setSplitTabLeft(null);
+      return;
+    }
+
+    const updateSplitTabAlignment = () => {
+      const shell = appShellRef.current;
+      const primaryPane = primaryPaneRef.current;
+      if (!shell || !primaryPane) return;
+      const left =
+        primaryPane.getBoundingClientRect().right -
+        shell.getBoundingClientRect().left -
+        shell.clientLeft;
+      setSplitTabLeft((current) =>
+        current !== null && Math.abs(current - left) < 0.5 ? current : left
+      );
+    };
+
+    updateSplitTabAlignment();
+    const observer = new ResizeObserver(updateSplitTabAlignment);
+    if (appShellRef.current) observer.observe(appShellRef.current);
+    if (primaryPaneRef.current) observer.observe(primaryPaneRef.current);
+    window.addEventListener("resize", updateSplitTabAlignment);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateSplitTabAlignment);
+    };
+  }, [Boolean(splitPane), sidebarLayoutOpen]);
 
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
@@ -273,6 +406,7 @@ export const App: React.FC = () => {
   // Inline rename state
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const renameCommitPathRef = useRef<string | null>(null);
 
   // Active Drag & Drop state
   const [dragState, setDragState] = useState<ActiveDragState | null>(null);
@@ -295,6 +429,9 @@ export const App: React.FC = () => {
   const [formatVolume, setFormatVolume] = useState<VolumeInfo | null>(null);
   const [firstAidVolume, setFirstAidVolume] = useState<VolumeInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [columnActivePath, setColumnActivePath] = useState<string | null>(null);
+  const columnActivePathRef = useRef<string | null>(null);
+  columnActivePathRef.current = columnActivePath;
   const [sudoPrompt, setSudoPrompt] = useState<SudoPromptState | null>(null);
   const [clipboard, setClipboard] = useState<ClipboardState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -477,7 +614,8 @@ export const App: React.FC = () => {
             prev.length === 1 &&
             (prev[0].path === "" ||
               prev[0].path === "~" ||
-              prev[0].path === data.homeDir)
+              prev[0].path === data.homeDir) &&
+            !prev[0].activeTag
           ) {
             return [
               {
@@ -577,7 +715,10 @@ export const App: React.FC = () => {
       }
     };
 
-    const interval = setInterval(pollVolumes, 2500);
+    // Sidebar data includes favorite discovery and volume metadata. Polling it
+    // every 2.5s repeats that work even when nothing changed; focus still
+    // triggers an immediate refresh when returning to the app.
+    const interval = setInterval(pollVolumes, 10_000);
     const onFocus = () => {
       pollVolumes();
     };
@@ -698,6 +839,39 @@ export const App: React.FC = () => {
   const sortedEntriesRef = useRef<FileEntry[]>(sortedEntries);
   sortedEntriesRef.current = sortedEntries;
 
+  useEffect(() => {
+    const rememberScrollPosition = (event: Event) => {
+      if (restoringTabScrollRef.current) return;
+      const element = event.target as HTMLElement | null;
+      const mode = element?.dataset.tabScrollView;
+      if (!element || !mode) return;
+      tabScrollPositionsRef.current.set(`${activeTabIdRef.current}:${mode}`, {
+        top: element.scrollTop,
+        left: element.scrollLeft,
+      });
+    };
+    document.addEventListener("scroll", rememberScrollPosition, true);
+    return () => document.removeEventListener("scroll", rememberScrollPosition, true);
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = document.querySelector<HTMLElement>(
+      `[data-tab-scroll-view="${viewMode}"]`
+    );
+    if (!element) return;
+    const position = tabScrollPositionsRef.current.get(`${activeTabId}:${viewMode}`);
+    restoringTabScrollRef.current = true;
+    element.scrollTop = position?.top ?? 0;
+    element.scrollLeft = position?.left ?? 0;
+    const frame = requestAnimationFrame(() => {
+      restoringTabScrollRef.current = false;
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      restoringTabScrollRef.current = false;
+    };
+  }, [activeTabId, viewMode, entries]);
+
   const knownEntriesMapRef = useRef<Map<string, FileEntry>>(new Map());
   useEffect(() => {
     const map = new Map<string, FileEntry>();
@@ -729,6 +903,7 @@ export const App: React.FC = () => {
       setSelectedPaths([]);
       lastSelectedPathRef.current = null;
       setRenamingPath(null);
+      setColumnActivePath(null);
       applyFavoriteViewModeIfPinned(path);
       applyCachedEntriesIfAvailable(path, null);
       const title = customTitle || folderDisplayName(path, mainPartitionName);
@@ -856,6 +1031,48 @@ export const App: React.FC = () => {
     [tabs, applyFavoriteViewModeIfPinned, applyCachedEntriesIfAvailable]
   );
 
+  const handleSplitTab = useCallback(
+    (tab: FinderTab) => {
+      if (tabs.length < 2) return;
+      const primaryTab = tabs.find((candidate) => candidate.id !== tab.id);
+      if (!primaryTab) return;
+      setActiveTabId(primaryTab.id);
+      setSelectedPaths([]);
+      setSearchQuery("");
+      setDebouncedSearchQuery("");
+      if (!primaryTab.activeTag) {
+        applyFavoriteViewModeIfPinned(primaryTab.path);
+      }
+      applyCachedEntriesIfAvailable(primaryTab.path, primaryTab.activeTag);
+      setSplitPane({
+        tabId: tab.id,
+        path: tab.path || sidebarData?.homeDir || "/",
+        title: tab.title,
+        activeTag: tab.activeTag || null,
+        key: Date.now(),
+      });
+    },
+    [tabs, sidebarData?.homeDir, applyFavoriteViewModeIfPinned, applyCachedEntriesIfAvailable]
+  );
+
+  const handleSplitPaneLocationChange = useCallback(
+    (location: { path: string; title: string; activeTag?: string | null }) => {
+      setSplitPane((prev) => {
+        if (!prev) return prev;
+        const activeTag = location.activeTag || null;
+        if (
+          prev.path === location.path &&
+          prev.title === location.title &&
+          prev.activeTag === activeTag
+        ) {
+          return prev;
+        }
+        return { ...prev, ...location, activeTag };
+      });
+    },
+    []
+  );
+
   const handleNewTab = useCallback(
     (initialPath?: string, initialTitle?: string) => {
       const validPath =
@@ -876,6 +1093,9 @@ export const App: React.FC = () => {
           ? "Home"
           : folderDisplayName(targetPath, mainPartitionName));
       const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      for (const mode of ["icons", "list", "columns", "gallery"] as const) {
+        tabScrollPositionsRef.current.set(`${id}:${mode}`, { top: 0, left: 0 });
+      }
       setTabs((prev) => [
         ...prev,
         {
@@ -898,10 +1118,31 @@ export const App: React.FC = () => {
   );
 
   const handleCloseTab = useCallback(
-    (id: string) => {
+    (id: string, allowLastTab = false) => {
+      if (allowLastTab) {
+        setSearchQuery("");
+        setDebouncedSearchQuery("");
+        setSelectedPaths([]);
+      }
+      const replacementId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       setTabs((prev) => {
-        if (prev.length <= 1) return prev;
+        if (prev.length <= 1 && !allowLastTab) return prev;
         const filtered = prev.filter((t) => t.id !== id);
+        if (filtered.length === 0) {
+          const homePath = sidebarData?.homeDir || "";
+          const homeTab: FinderTab = {
+            id: replacementId,
+            title: "Home",
+            path: homePath,
+            history: [homePath],
+            historyIndex: 0,
+            activeTag: null,
+          };
+          setActiveTabId(homeTab.id);
+          applyFavoriteViewModeIfPinned(homePath);
+          applyCachedEntriesIfAvailable(homePath, null);
+          return [homeTab];
+        }
         if (activeTabId === id) {
           const nextTab = filtered[filtered.length - 1];
           setActiveTabId(nextTab.id);
@@ -915,9 +1156,31 @@ export const App: React.FC = () => {
     },
     [
       activeTabId,
+      sidebarData?.homeDir,
       applyFavoriteViewModeIfPinned,
       applyCachedEntriesIfAvailable,
     ]
+  );
+
+  const handleReorderTabs = useCallback(
+    (draggedId: string, targetId: string, after: boolean) => {
+      setTabs((prev) => {
+        const fromIndex = prev.findIndex((tab) => tab.id === draggedId);
+        const targetIndex = prev.findIndex((tab) => tab.id === targetId);
+        if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex) {
+          return prev;
+        }
+
+        const reordered = [...prev];
+        const [draggedTab] = reordered.splice(fromIndex, 1);
+        const targetPosition = reordered.findIndex((tab) => tab.id === targetId);
+        const destination = targetPosition + (after ? 1 : 0);
+        if (destination === fromIndex) return prev;
+        reordered.splice(destination, 0, draggedTab);
+        return reordered;
+      });
+    },
+    []
   );
 
   // Selection & Range Selection
@@ -949,7 +1212,7 @@ export const App: React.FC = () => {
             const start = Math.min(anchorIdx, targetIdx);
             const end = Math.max(anchorIdx, targetIdx);
             const rangePaths = list.slice(start, end + 1).map((e) => e.path);
-            if (modifiers.metaOrCtrl) {
+            if (modifiers.ctrlKey) {
               return Array.from(new Set([...prev, ...rangePaths]));
             }
             return rangePaths;
@@ -958,7 +1221,7 @@ export const App: React.FC = () => {
           return prev.includes(entry.path) ? prev : [...prev, entry.path];
         }
 
-        if (modifiers.metaOrCtrl) {
+        if (modifiers.ctrlKey) {
           lastSelectedPathRef.current = entry.path;
           return prev.includes(entry.path)
             ? prev.filter((p) => p !== entry.path)
@@ -1019,62 +1282,120 @@ export const App: React.FC = () => {
   );
 
   // File Operations
-  const handleNewFolder = useCallback(async () => {
-    if (!activeTab || activeTab.path === "__RECENTS__" || activeTab.activeTag) {
-      showToast("Navigate to a folder first to create a new folder");
-      return;
-    }
-    const baseName = "untitled folder";
-    let candidate = baseName;
-    let counter = 2;
-    const existingNames = new Set(entries.map((e) => e.name));
-    while (existingNames.has(candidate)) {
-      candidate = `${baseName} ${counter++}`;
-    }
-    try {
-      const created = await apiCreateDirectory(activeTab.path, candidate);
-      await loadCurrentEntries(true);
-      setSelectedPaths([created.path]);
-      lastSelectedPathRef.current = created.path;
-      setRenamingPath(created.path);
-      setRenameValue(created.name);
-    } catch (err) {
-      showToast(`${err}`);
-    }
-  }, [activeTab, entries, loadCurrentEntries, showToast]);
+  const handleNewFolder = useCallback(
+    async (targetDirOverride?: string) => {
+      const targetDir =
+        targetDirOverride ||
+        contextMenu?.targetDir ||
+        (viewMode === "columns" && columnActivePathRef.current
+          ? columnActivePathRef.current
+          : activeTab?.path);
+      if (!targetDir || targetDir === "__RECENTS__" || activeTab?.activeTag) {
+        showToast("Navigate to a folder first to create a new folder");
+        return;
+      }
+      const baseName = "untitled folder";
+      let candidate = baseName;
+      let counter = 2;
+      let existingNames = new Set(entries.map((e) => e.name));
+      if (targetDir !== activeTab?.path) {
+        try {
+          const targetEntries = await apiReadDirectory(targetDir, showHidden);
+          existingNames = new Set(targetEntries.map((e) => e.name));
+        } catch {
+          // ignore
+        }
+      }
+      while (existingNames.has(candidate)) {
+        candidate = `${baseName} ${counter++}`;
+      }
+      try {
+        const created = await apiCreateDirectory(targetDir, candidate);
+        knownEntriesMapRef.current.set(created.path, created);
+        await loadCurrentEntries(true);
+        setSelectedPaths([created.path]);
+        lastSelectedPathRef.current = created.path;
+        setRenamingPath(created.path);
+        setRenameValue(created.name);
+      renameCommitPathRef.current = null;
+      } catch (err) {
+        showToast(`${err}`);
+      }
+    },
+    [
+      contextMenu?.targetDir,
+      viewMode,
+      activeTab?.path,
+      activeTab?.activeTag,
+      entries,
+      showHidden,
+      loadCurrentEntries,
+      showToast,
+    ]
+  );
 
-  const handleNewFile = useCallback(async () => {
-    if (!activeTab || activeTab.path === "__RECENTS__" || activeTab.activeTag) {
-      showToast("Navigate to a folder first to create a file");
-      return;
-    }
-    const baseName = "untitled.txt";
-    let candidate = baseName;
-    let counter = 2;
-    const existingNames = new Set(entries.map((e) => e.name));
-    while (existingNames.has(candidate)) {
-      candidate = `untitled ${counter++}.txt`;
-    }
-    try {
-      const created = await apiCreateFile(activeTab.path, candidate);
-      await loadCurrentEntries(true);
-      setSelectedPaths([created.path]);
-      lastSelectedPathRef.current = created.path;
-      setRenamingPath(created.path);
-      setRenameValue(created.name);
-    } catch (err) {
-      showToast(`${err}`);
-    }
-  }, [activeTab, entries, loadCurrentEntries, showToast]);
+  const handleNewFile = useCallback(
+    async (targetDirOverride?: string) => {
+      const targetDir =
+        targetDirOverride ||
+        contextMenu?.targetDir ||
+        (viewMode === "columns" && columnActivePathRef.current
+          ? columnActivePathRef.current
+          : activeTab?.path);
+      if (!targetDir || targetDir === "__RECENTS__" || activeTab?.activeTag) {
+        showToast("Navigate to a folder first to create a file");
+        return;
+      }
+      const baseName = "untitled.txt";
+      let candidate = baseName;
+      let counter = 2;
+      let existingNames = new Set(entries.map((e) => e.name));
+      if (targetDir !== activeTab?.path) {
+        try {
+          const targetEntries = await apiReadDirectory(targetDir, showHidden);
+          existingNames = new Set(targetEntries.map((e) => e.name));
+        } catch {
+          // ignore
+        }
+      }
+      while (existingNames.has(candidate)) {
+        candidate = `untitled ${counter++}.txt`;
+      }
+      try {
+        const created = await apiCreateFile(targetDir, candidate);
+        knownEntriesMapRef.current.set(created.path, created);
+        await loadCurrentEntries(true);
+        setSelectedPaths([created.path]);
+        lastSelectedPathRef.current = created.path;
+        setRenamingPath(created.path);
+        setRenameValue(created.name);
+      } catch (err) {
+        showToast(`${err}`);
+      }
+    },
+    [
+      contextMenu?.targetDir,
+      viewMode,
+      activeTab?.path,
+      activeTab?.activeTag,
+      entries,
+      showHidden,
+      loadCurrentEntries,
+      showToast,
+    ]
+  );
 
   const startRename = useCallback((entry: FileEntry) => {
     knownEntriesMapRef.current.set(entry.path, entry);
+    renameCommitPathRef.current = null;
     setRenamingPath(entry.path);
     setRenameValue(entry.name);
   }, []);
 
   const submitRename = useCallback(async () => {
     if (!renamingPath) return;
+    if (renameCommitPathRef.current === renamingPath) return;
+    renameCommitPathRef.current = renamingPath;
     const trimmed = renameValue.trim();
     const targetEntry =
       entries.find((e) => e.path === renamingPath) ||
@@ -1092,6 +1413,22 @@ export const App: React.FC = () => {
       showToast(`${err}`);
     }
   }, [renamingPath, renameValue, entries, loadCurrentEntries, showToast]);
+
+  // Commit inline names on any outside click, including controls that prevent
+  // the input from losing focus (where the input's onBlur would not fire).
+  useEffect(() => {
+    if (!renamingPath) return;
+    const commitOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("[data-rename-input]")) {
+        return;
+      }
+      void submitRename();
+    };
+    document.addEventListener("pointerdown", commitOnOutsidePointerDown, true);
+    return () =>
+      document.removeEventListener("pointerdown", commitOnOutsidePointerDown, true);
+  }, [renamingPath, submitRename]);
 
   const handleDuplicate = useCallback(
     async (entry?: FileEntry) => {
@@ -1153,24 +1490,33 @@ export const App: React.FC = () => {
     [selectedPaths, showToast]
   );
 
-  const handlePaste = useCallback(async () => {
-    if (!clipboard || !activeTab || activeTab.path === "__RECENTS__") return;
-    try {
-      if (clipboard.mode === "copy") {
-        const created = await apiCopyItems(clipboard.paths, activeTab.path);
-        setSelectedPaths(created);
-        showToast(`Pasted ${created.length} item(s)`);
-      } else {
-        const moved = await apiMoveItems(clipboard.paths, activeTab.path);
-        setSelectedPaths(moved);
-        setClipboard(null);
-        showToast(`Moved ${moved.length} item(s)`);
+  const handlePaste = useCallback(
+    async (targetDirOverride?: string) => {
+      const destDir =
+        targetDirOverride ||
+        contextMenu?.targetDir ||
+        (viewMode === "columns" && columnActivePathRef.current
+          ? columnActivePathRef.current
+          : activeTab?.path);
+      if (!clipboard || !destDir || destDir === "__RECENTS__") return;
+      try {
+        if (clipboard.mode === "copy") {
+          const created = await apiCopyItems(clipboard.paths, destDir);
+          setSelectedPaths(created);
+          showToast(`Pasted ${created.length} item(s)`);
+        } else {
+          const moved = await apiMoveItems(clipboard.paths, destDir);
+          setSelectedPaths(moved);
+          setClipboard(null);
+          showToast(`Moved ${moved.length} item(s)`);
+        }
+        await loadCurrentEntries(true);
+      } catch (err) {
+        showToast(`${err}`);
       }
-      await loadCurrentEntries(true);
-    } catch (err) {
-      showToast(`${err}`);
-    }
-  }, [clipboard, activeTab, loadCurrentEntries, showToast]);
+    },
+    [clipboard, contextMenu?.targetDir, viewMode, activeTab?.path, loadCurrentEntries, showToast]
+  );
 
   const handleToggleTag = useCallback(
     async (path: string, color: string) => {
@@ -1312,23 +1658,26 @@ export const App: React.FC = () => {
       if (e.button !== 0) return;
       const target = e.target as HTMLElement;
       if (target && target.closest("input, textarea, button")) return;
+      const startedInSplitPane = Boolean(target.closest("[data-split-pane]"));
 
       e.stopPropagation();
       e.preventDefault();
 
       const startX = e.clientX;
       const startY = e.clientY;
-      const metaOrCtrl = e.metaKey || e.ctrlKey;
+      const ctrlKey = e.ctrlKey;
       const shift = e.shiftKey;
 
-      const currentSelected = selectedPathsRef.current;
+      const currentSelected = startedInSplitPane
+        ? [entry.path]
+        : selectedPathsRef.current;
       const alreadySelected = currentSelected.includes(entry.path);
 
       // Determine which paths will be dragged if the user moves the cursor
       let dragPaths: string[];
       if (alreadySelected) {
         dragPaths = [...currentSelected];
-      } else if (metaOrCtrl || shift) {
+      } else if (ctrlKey || shift) {
         dragPaths = [...currentSelected, entry.path];
       } else {
         // Select immediately on mousedown so single un-selected item highlights right away
@@ -1521,7 +1870,7 @@ export const App: React.FC = () => {
         if (!isDragging) {
           // User clicked without dragging
           const mods: SelectionModifiers = {
-            metaOrCtrl: ev.metaKey || ev.ctrlKey,
+            ctrlKey: ev.ctrlKey,
             shift: ev.shiftKey,
           };
           if (onClickOverride) {
@@ -1539,10 +1888,18 @@ export const App: React.FC = () => {
         if (latestDropPath) {
           const destDir = latestDropPath;
           const destLabel = latestDropName || folderDisplayName(destDir);
+          const droppedIntoSplitPane = Boolean(
+            document
+              .elementFromPoint(ev.clientX, ev.clientY)
+              ?.closest("[data-split-pane]")
+          );
           try {
             if (isCopy) {
               const copied = await apiCopyItems(dragPaths, destDir);
               await loadCurrentEntries(true);
+              if (startedInSplitPane || droppedIntoSplitPane) {
+                setSplitPaneRefreshVersion((version) => version + 1);
+              }
               setSelectedPaths(copied);
               showToast(
                 `Copied ${copied.length} item(s) to "${destLabel}"`
@@ -1555,6 +1912,9 @@ export const App: React.FC = () => {
                 await apiMoveItems(sourcesToMove, destDir);
                 setSelectedPaths([]);
                 await loadCurrentEntries(true);
+                if (startedInSplitPane || droppedIntoSplitPane) {
+                  setSplitPaneRefreshVersion((version) => version + 1);
+                }
                 showToast(
                   `Moved ${sourcesToMove.length} item(s) to "${destLabel}"`
                 );
@@ -2229,15 +2589,21 @@ export const App: React.FC = () => {
     });
   }, []);
 
+  useLayoutEffect(() => {
+    if (!renamingPath) return;
+    const index = sortedEntries.findIndex((entry) => entry.path === renamingPath);
+    scrollEntryIntoView(renamingPath, index >= 0 ? index : undefined);
+  }, [renamingPath, sortedEntries, scrollEntryIntoView]);
+
   const typeAheadBufferRef = useRef("");
   const typeAheadTimerRef = useRef<number | null>(null);
 
   // Global macOS Finder Keyboard Shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      const cmdOrCtrl = e.ctrlKey;
 
-      // Zoom In: Cmd/Ctrl + Plus / Equal (always active)
+      // Zoom In: Ctrl + Plus / Equal (always active)
       if (
         cmdOrCtrl &&
         (e.key === "+" ||
@@ -2254,7 +2620,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Zoom Out: Cmd/Ctrl + Minus / Underscore (always active)
+      // Zoom Out: Ctrl + Minus / Underscore (always active)
       if (
         cmdOrCtrl &&
         (e.key === "-" ||
@@ -2271,7 +2637,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Zoom Reset: Cmd/Ctrl + 0 (always active)
+      // Zoom Reset: Ctrl + 0 (always active)
       if (
         cmdOrCtrl &&
         (e.key === "0" || e.code === "Numpad0" || e.code === "Digit0")
@@ -2282,7 +2648,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Cmd/Ctrl + 1/2/3/4 -> Switch View Mode (always active)
+      // Ctrl + 1/2/3/4 -> Switch View Mode (always active)
       if (cmdOrCtrl && ["1", "2", "3", "4"].includes(e.key)) {
         e.preventDefault();
         const map: Record<string, ViewMode> = {
@@ -2295,18 +2661,31 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Toggle Sidebar: Cmd/Ctrl + Option/Alt + S or Cmd/Ctrl + B
+      // Toggle Sidebar: Ctrl + Alt + S or Ctrl + B
       if (
         (cmdOrCtrl && e.altKey && e.key.toLowerCase() === "s") ||
         (cmdOrCtrl && !e.altKey && e.key.toLowerCase() === "b")
       ) {
         e.preventDefault();
-        setSidebarOpen((v) => !v);
+        toggleSidebar();
         return;
       }
 
       const targetEl = e.target as HTMLInputElement | null;
       const tag = targetEl?.tagName;
+      if (
+        e.code === "Space" &&
+        !cmdOrCtrl &&
+        targetEl?.hasAttribute("data-file-search")
+      ) {
+        e.preventDefault();
+        if (quickLookEntry) {
+          setQuickLookEntry(null);
+        } else if (primarySelectedEntry) {
+          setQuickLookEntry(primarySelectedEntry);
+        }
+        return;
+      }
       if (
         tag === "TEXTAREA" ||
         (tag === "INPUT" && targetEl?.type !== "range")
@@ -2314,7 +2693,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Cmd/Ctrl + A -> Select All items in current folder
+      // Ctrl + A -> Select All items in current folder
       if (cmdOrCtrl && e.key.toLowerCase() === "a") {
         e.preventDefault();
         setSelectedPaths(sortedEntries.map((item) => item.path));
@@ -2345,10 +2724,9 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Enter -> Rename selected item (macOS Finder standard!)
+      // F2 -> Rename selected item
       if (
-        e.key === "Enter" &&
-        !cmdOrCtrl &&
+        e.key === "F2" &&
         primarySelectedEntry &&
         !renamingPath
       ) {
@@ -2357,7 +2735,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Cmd/Ctrl + O or Cmd/Ctrl + Down -> Open item(s)
+      // Ctrl + O or Ctrl + Down -> Open item(s)
       if (cmdOrCtrl && (e.key.toLowerCase() === "o" || e.key === "ArrowDown")) {
         if (primarySelectedEntry) {
           e.preventDefault();
@@ -2366,7 +2744,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Cmd/Ctrl + Up or Alt + Up -> Go to parent folder (cd ..)
+      // Ctrl + Up or Alt + Up -> Go to parent folder (cd ..)
       if ((cmdOrCtrl || e.altKey) && e.key === "ArrowUp") {
         if (canGoUp) {
           e.preventDefault();
@@ -2545,7 +2923,7 @@ export const App: React.FC = () => {
         }
       }
 
-      // Cmd/Ctrl + I -> Get Info
+      // Ctrl + I -> Get Info
       if (cmdOrCtrl && e.key.toLowerCase() === "i") {
         e.preventDefault();
         if (primarySelectedEntry) {
@@ -2554,35 +2932,35 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Cmd/Ctrl + T -> New Tab
+      // Ctrl + T -> New Tab
       if (cmdOrCtrl && e.key.toLowerCase() === "t") {
         e.preventDefault();
         handleNewTab();
         return;
       }
 
-      // Super/Ctrl + R or F5 -> Reload Folder
+      // Ctrl + R or F5 -> Reload Folder
       if (e.key === "F5" || (cmdOrCtrl && e.key.toLowerCase() === "r")) {
         e.preventDefault();
         loadCurrentEntries(true);
         return;
       }
 
-      // Cmd/Ctrl + Shift + . -> Toggle Hidden Dotfiles
+      // Ctrl + Shift + . -> Toggle Hidden Dotfiles
       if (cmdOrCtrl && e.shiftKey && e.key === ".") {
         e.preventDefault();
         setShowHidden((v) => !v);
         return;
       }
 
-      // Cmd/Ctrl + Shift + N -> New Folder
+      // Ctrl + Shift + N -> New Folder
       if (cmdOrCtrl && e.shiftKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
         handleNewFolder();
         return;
       }
 
-      // Cmd/Ctrl + C / X / V / D
+      // Ctrl + C / X / V / D
       if (cmdOrCtrl && e.key.toLowerCase() === "c") {
         e.preventDefault();
         handleCopy();
@@ -2604,7 +2982,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Delete or Cmd+Backspace -> Move to Trash
+      // Delete or Ctrl+Backspace -> Move to Trash
       if (e.key === "Delete" || (cmdOrCtrl && e.key === "Backspace")) {
         e.preventDefault();
         handleTrash();
@@ -2638,6 +3016,7 @@ export const App: React.FC = () => {
     setIconSize,
     setViewMode,
     scrollEntryIntoView,
+    toggleSidebar,
   ]);
 
   // Global prevention for trackpad pinch-to-zoom and WebKit context menu
@@ -2697,14 +3076,17 @@ export const App: React.FC = () => {
     lastSelectedPathRef.current = null;
   }, []);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, entry?: FileEntry) => {
-    e.preventDefault();
-    if (entry && !selectedPathsRef.current.includes(entry.path)) {
-      setSelectedPaths([entry.path]);
-      lastSelectedPathRef.current = entry.path;
-    }
-    setContextMenu({ x: e.clientX, y: e.clientY, entry });
-  }, []);
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, entry?: FileEntry, targetDir?: string) => {
+      e.preventDefault();
+      if (entry && !selectedPathsRef.current.includes(entry.path)) {
+        setSelectedPaths([entry.path]);
+        lastSelectedPathRef.current = entry.path;
+      }
+      setContextMenu({ x: e.clientX, y: e.clientY, entry, targetDir });
+    },
+    []
+  );
 
   const handleContextMenuFavorite = useCallback(
     (
@@ -2852,12 +3234,13 @@ export const App: React.FC = () => {
 
   return (
     <div
+      ref={appShellRef}
       onDragOver={handleNativeDomDragOver}
       onDrop={handleNativeDomDrop}
-      className={`w-screen h-screen flex flex-col rounded-xl overflow-hidden macos-window-shadow border ${
+      className={`w-screen h-screen flex flex-col overflow-hidden macos-window-shadow border ${
         darkMode
-          ? "bg-[#1e1e22] text-zinc-100 border-white/15"
-          : "bg-white text-zinc-900 border-black/15"
+          ? "bg-[#202024] text-zinc-100 border-white/15"
+          : "bg-[#f2f2f5] text-zinc-900 border-black/15"
       }`}
     >
       {/* Top Unified macOS Finder Toolbar & Tab Strip */}
@@ -2893,12 +3276,21 @@ export const App: React.FC = () => {
         }}
         onRefresh={() => loadCurrentEntries(true)}
         sidebarOpen={sidebarOpen}
-        onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        onToggleSidebar={toggleSidebar}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((v) => !v)}
-        tabs={tabs}
+        tabs={splitPane ? tabs.filter((tab) => tab.id !== splitPane.tabId) : tabs}
         activeTabId={activeTabId}
+        splitTab={splitPane ? { id: splitPane.tabId, title: splitPane.title } : null}
+        splitTabLeft={splitTabLeft}
+        canSplitTab={tabs.length >= 2}
         onSelectTab={handleSelectTab}
+        onSplitTab={handleSplitTab}
+        onCloseSplitPane={() => {
+          if (splitPane) handleCloseTab(splitPane.tabId);
+          setSplitPane(null);
+        }}
+        onReorderTabs={handleReorderTabs}
         onNewTab={handleNewTab}
         onCloseTab={handleCloseTab}
         dropTargetPath={activeDropTargetPath}
@@ -2926,9 +3318,17 @@ export const App: React.FC = () => {
       {/* Main Content Split: Translucent Sidebar + Active View Mode */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
         <div
+          onTransitionEnd={(event) => {
+            if (
+              event.target === event.currentTarget.firstElementChild &&
+              event.propertyName === "transform"
+            ) {
+              finishSidebarCollapse();
+            }
+          }}
           className={`macos-sidebar-container ${
-            sidebarOpen ? "" : "is-collapsed"
-          }`}
+            sidebarLayoutOpen ? "" : "is-collapsed"
+          } ${sidebarOpen ? "" : "is-hidden"}`}
         >
           <Sidebar
             data={sidebarData}
@@ -2959,16 +3359,65 @@ export const App: React.FC = () => {
               : ""
           }`}
         >
-          {viewMode === "icons" && <IconView {...commonViewProps} />}
-          {viewMode === "list" && <ListView {...commonViewProps} />}
-          {viewMode === "columns" && (
-            <ColumnView
-              {...commonViewProps}
-              currentPath={activeTab?.path || "/"}
-              rootPartitionName={mainPartitionName}
-            />
-          )}
-          {viewMode === "gallery" && <GalleryView {...commonViewProps} />}
+          <div
+            ref={splitContentRef}
+            className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
+          >
+            <div
+              ref={primaryPaneRef}
+              data-drop-path={
+                activeTab && !activeTab.activeTag && activeTab.path !== "__RECENTS__"
+                  ? activeTab.path
+                  : undefined
+              }
+              data-drop-name={activeTab?.title}
+              className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${
+                activeDropTargetPath === activeTab?.path
+                  ? "ring-2 ring-inset ring-[#0a84ff]/70"
+                  : ""
+              }`}
+            >
+              {viewMode === "icons" && <IconView {...commonViewProps} />}
+              {viewMode === "list" && <ListView {...commonViewProps} />}
+              {viewMode === "columns" && (
+                <ColumnView
+                  {...commonViewProps}
+                  currentPath={activeTab?.path || "/"}
+                  rootPartitionName={mainPartitionName}
+                  onActiveDirectoryChange={setColumnActivePath}
+                />
+              )}
+              {viewMode === "gallery" && <GalleryView {...commonViewProps} />}
+            </div>
+            {splitPane && (
+              <SplitExplorerPane
+                key={splitPane.key}
+                initialPath={splitPane.path}
+                initialTitle={splitPane.title}
+                initialTag={splitPane.activeTag}
+                darkMode={darkMode}
+                refreshVersion={splitPaneRefreshVersion}
+                onStartItemDrag={handleStartItemDrag}
+                dropTargetPath={activeDropTargetPath}
+                panelWidthPercent={splitPaneRatio * 100}
+                onClose={() => setSplitPane(null)}
+                onLocationChange={handleSplitPaneLocationChange}
+              />
+            )}
+            {splitPane && (
+              <div
+                role="separator"
+                aria-label="Resize split panes"
+                aria-orientation="vertical"
+                aria-valuenow={Math.round((1 - splitPaneRatio) * 100)}
+                tabIndex={0}
+                onPointerDown={handleSplitResizeStart}
+                onPointerMove={handleSplitResize}
+                className="absolute inset-y-0 z-20 w-2 -translate-x-1/2 cursor-col-resize touch-none bg-transparent after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-[#0a84ff]/0 hover:after:bg-[#0a84ff]/60"
+                style={{ left: `${(1 - splitPaneRatio) * 100}%` }}
+              />
+            )}
+          </div>
 
           {externalDropInfo && (
             <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#0a84ff] text-white text-xs font-medium shadow-lg border border-white/25">
@@ -2996,7 +3445,11 @@ export const App: React.FC = () => {
 
       {/* Bottom Interactive Path Bar & Status Bar */}
       <BottomBars
-        currentPath={activeTab?.path || "/"}
+        currentPath={
+          viewMode === "columns" && columnActivePath
+            ? columnActivePath
+            : activeTab?.path || "/"
+        }
         rootPartitionName={mainPartitionName}
         activeTag={activeTab?.activeTag || null}
         totalItems={sortedEntries.length}
@@ -3018,7 +3471,7 @@ export const App: React.FC = () => {
         darkMode={darkMode}
       />
 
-      {/* Get Info Inspector Modal (Cmd/Ctrl + I) */}
+      {/* Get Info Inspector Modal (Ctrl + I) */}
       <GetInfoModal
         entry={getInfoEntry}
         volume={getInfoVolume}
@@ -3068,11 +3521,11 @@ export const App: React.FC = () => {
         onDuplicate={handleDuplicate}
         onCopy={handleCopy}
         onCut={handleCut}
-        onPaste={handlePaste}
+        onPaste={() => handlePaste(contextMenu?.targetDir)}
         canPaste={Boolean(clipboard && clipboard.paths.length > 0)}
         onTrash={handleTrash}
-        onNewFolder={handleNewFolder}
-        onNewFile={handleNewFile}
+        onNewFolder={() => handleNewFolder(contextMenu?.targetDir)}
+        onNewFile={() => handleNewFile(contextMenu?.targetDir)}
         onToggleTag={handleToggleTag}
         onAddFavorite={handleAddFavorite}
         darkMode={darkMode}

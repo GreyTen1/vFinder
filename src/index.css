@@ -113,30 +113,88 @@
 
 /* Clean macOS sidebar surface (solid color avoids WebKitGTK dirty-rect gradient artifacts) */
 .macos-sidebar-glass-dark {
-  background-color: #212126;
+  background-color: #202024;
 }
 
 .macos-sidebar-glass-light {
-  background-color: #eaeaf0;
+  background-color: #f2f2f5;
 }
 
-/* macOS Finder Sidebar Smooth Collapse / Expand Animation (GPU composited, 0 reflow) */
+.workspace-tab-active {
+  isolation: isolate;
+  overflow: visible;
+}
+
+.workspace-tab-active::before,
+.workspace-tab-active::after {
+  position: absolute;
+  bottom: 0;
+  z-index: -1;
+  width: 8px;
+  height: 8px;
+  background: transparent;
+  content: "";
+  pointer-events: none;
+}
+
+.workspace-tab-active::before {
+  left: -8px;
+  border-bottom-right-radius: 8px;
+  box-shadow: 0 6px 0 0 var(--workspace-tab-surface);
+}
+
+.workspace-tab-active::after {
+  right: -8px;
+  border-bottom-left-radius: 8px;
+  box-shadow: 0 6px 0 0 var(--workspace-tab-surface);
+}
+
+.workspace-tab-active-dark {
+  --workspace-tab-surface: #202024;
+}
+
+.workspace-tab-active-light {
+  --workspace-tab-surface: #f2f2f5;
+}
+
+/* Resize the workspace once while the sidebar slides independently. */
 .macos-sidebar-container {
   width: 240px;
   min-width: 240px;
   max-width: 240px;
+  flex: 0 0 240px;
   height: 100%;
-  flex-shrink: 0;
-  margin-left: 0;
-  opacity: 1;
-  transition: margin-left 220ms cubic-bezier(0.25, 1, 0.5, 1),
-              opacity 180ms ease;
-  will-change: margin-left, opacity;
-  transform: translateZ(0);
+  position: relative;
+  z-index: 20;
+  overflow: visible;
 }
 
 .macos-sidebar-container.is-collapsed {
-  margin-left: -240px;
-  opacity: 0;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  flex-basis: 0;
+}
+
+.macos-sidebar-container.is-hidden {
   pointer-events: none;
+}
+
+.macos-sidebar-container aside {
+  transform: translateX(0);
+  transition: transform 220ms cubic-bezier(0.25, 1, 0.5, 1);
+  will-change: transform;
+}
+
+.macos-sidebar-container.is-hidden aside {
+  transform: translateX(-100%);
+}
+
+.macos-sidebar-container aside {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.macos-sidebar-container aside::-webkit-scrollbar {
+  display: none;
 }

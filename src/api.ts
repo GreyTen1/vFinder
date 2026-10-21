@@ -332,6 +332,19 @@ export async function apiGetDefaultDownloadsDir(): Promise<string> {
   return "~/Downloads";
 }
 
+export async function apiOpenDetachedTab(tab: {
+  path: string;
+  title: string;
+  activeTag?: string | null;
+}): Promise<string> {
+  if (!isTauri()) throw new Error("Detached tabs require the desktop app");
+  return invoke<string>("open_detached_tab_window", {
+    path: tab.path,
+    title: tab.title,
+    activeTag: tab.activeTag ?? null,
+  });
+}
+
 export async function apiGetPendingDownloads(): Promise<InterceptedDownload[]> {
   if (isTauri()) {
     return await invoke<InterceptedDownload[]>("get_pending_downloads");

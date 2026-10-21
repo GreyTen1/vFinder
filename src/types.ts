@@ -109,26 +109,48 @@ export function formatBytes(bytes: number, decimals = 1): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
+const MAC_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const MAC_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+});
+const MAC_DATE_CACHE = new Map<number, string>();
+let macDateCacheDay = "";
+
 export function formatMacDate(unixSecs: number): string {
   if (!unixSecs) return "—";
-  const date = new Date(unixSecs * 1000);
+
   const now = new Date();
+  const todayKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+  if (todayKey !== macDateCacheDay) {
+    MAC_DATE_CACHE.clear();
+    macDateCacheDay = todayKey;
+  }
+
+  const cached = MAC_DATE_CACHE.get(unixSecs);
+  if (cached !== undefined) return cached;
+
+  const date = new Date(unixSecs * 1000);
   const isToday =
     date.getDate() === now.getDate() &&
     date.getMonth() === now.getMonth() &&
     date.getFullYear() === now.getFullYear();
 
-  const timeStr = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (isToday) {
-    return `Today at ${timeStr}`;
-  }
+  const timeStr = MAC_TIME_FORMATTER.format(date);
+  const formatted = isToday
+    ? `Today at ${timeStr}`
+    : `${MAC_DATE_FORMATTER.format(date)} at ${timeStr}`;
 
-  const dateStr = date.toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  return `${dateStr} at ${timeStr}`;
+  if (MAC_DATE_CACHE.size >= 20_000) {
+    const oldestKey = MAC_DATE_CACHE.keys().next().value;
+    if (oldestKey !== undefined) MAC_DATE_CACHE.delete(oldestKey);
+  }
+  MAC_DATE_CACHE.set(unixSecs, formatted);
+  return formatted;
 }
 
 export interface FormatTypeOption {

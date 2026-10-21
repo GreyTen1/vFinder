@@ -4,7 +4,6 @@ use crate::models::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
-use tauri::AppHandle;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -14,10 +13,72 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, UNIX_EPOCH};
+use tauri::{AppHandle, Manager};
 
 static TAGS_CACHE: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
 static OPEN_WITH_CACHE: OnceLock<Mutex<OpenWithConfig>> = OnceLock::new();
 static META_CONFIG_VERSION: AtomicU64 = AtomicU64::new(1);
+static DETACHED_WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+#[tauri::command]
+pub async fn open_detached_tab_window(
+    window: tauri::WebviewWindow,
+    path: String,
+    title: String,
+    active_tag: Option<String>,
+) -> Result<String, String> {
+    let counter = DETACHED_WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let label = format!("explorer-{}-{counter}", std::process::id());
+    let mut app_path = format!(
+        "index.html?vfinder_detached=1&vfinder_path={}&vfinder_title={}",
+        encode_query_value(&path),
+        encode_query_value(&title)
+    );
+    if let Some(tag) = active_tag {
+        app_path.push_str("&vfinder_tag=");
+        app_path.push_str(&encode_query_value(&tag));
+    }
+
+    let app_handle = window.app_handle();
+    let new_window = tauri::WebviewWindowBuilder::new(
+        app_handle,
+        &label,
+        tauri::WebviewUrl::App(PathBuf::from(app_path)),
+    )
+    .title("vFinder")
+    .inner_size(1160.0, 740.0)
+    .min_inner_size(760.0, 480.0)
+    .decorations(false)
+    .resizable(true)
+    .transparent(false)
+    .visible(true)
+    .center()
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    if app_handle.get_webview_window(&label).is_none() {
+        let _ = new_window.close();
+        return Err("Detached window was not registered".to_string());
+    }
+
+    let _ = new_window.set_background_color(Some(tauri::window::Color(30, 30, 34, 255)));
+    #[cfg(target_os = "linux")]
+    crate::setup_linux_webview(&new_window);
+    crate::download_server::activate_window_cross_desktop(&new_window);
+    Ok(label)
+}
 
 struct CachedVolumeList {
     signature: String,
@@ -2292,6 +2353,17 @@ pub async fn get_image_thumbnail(
             .unwrap_or(0);
         let file_size = metadata.len();
 
+        // JPEG cannot store alpha. Keep an alpha-capable cache format for image
+        // types that may contain transparent pixels; JPEG inputs remain compact.
+        let thumbnail_extension = if matches!(
+            ext.as_str(),
+            "png" | "gif" | "webp" | "bmp" | "ico" | "avif"
+        ) {
+            "png"
+        } else {
+            "jpg"
+        };
+
         let cache_dir = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("vfinder/thumbnails");
@@ -2303,7 +2375,7 @@ pub async fn get_image_thumbnail(
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
-        let cache_file = cache_dir.join(format!("{}.jpg", cache_hash));
+        let cache_file = cache_dir.join(format!("{}.{}", cache_hash, thumbnail_extension));
 
         if cache_file.exists() && cache_file.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             return Ok(cache_file.to_string_lossy().to_string());
@@ -2318,7 +2390,7 @@ pub async fn get_image_thumbnail(
         let img = image::open(&canonical).map_err(|e| e.to_string())?;
         let thumb = img.thumbnail(target_size, target_size);
 
-        // Save as JPEG to cache
+        // Save using the cache format selected above so transparent pixels survive.
         thumb.save(&cache_file).map_err(|e| e.to_string())?;
 
         Ok(cache_file.to_string_lossy().to_string())

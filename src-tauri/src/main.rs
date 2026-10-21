@@ -390,6 +390,7 @@ fn main() {
             commands::get_recent_files,
             commands::show_main_window,
             commands::close_main_window,
+            commands::open_detached_tab_window,
             commands::get_image_thumbnail,
             commands::get_file_info,
             commands::get_available_format_types,

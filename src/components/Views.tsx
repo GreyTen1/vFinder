@@ -19,7 +19,7 @@ import { apiReadDirectory, apiReadFilePreview } from "../api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 export interface SelectionModifiers {
-  metaOrCtrl: boolean;
+  ctrlKey: boolean;
   shift: boolean;
 }
 
@@ -34,7 +34,11 @@ export interface CommonViewProps {
   onSetSelection: (paths: string[]) => void;
   onClearSelection: () => void;
   onOpenEntry: (entry: FileEntry) => void;
-  onContextMenu: (e: React.MouseEvent, entry?: FileEntry) => void;
+  onContextMenu: (
+    e: React.MouseEvent,
+    entry?: FileEntry,
+    targetDir?: string
+  ) => void;
   onStartItemDrag: (
     e: React.MouseEvent,
     entry: FileEntry,
@@ -150,7 +154,7 @@ function useMarqueeSelection({
     const startScrollX = container.scrollLeft + (startClientX - rectInit.left);
     const startScrollY = container.scrollTop + (startClientY - rectInit.top);
 
-    const additive = e.metaKey || e.ctrlKey || e.shiftKey;
+    const additive = e.ctrlKey || e.shiftKey;
     const baseSelection = additive ? [...selectedPathsRef.current] : [];
 
     let isMarqueeActive = false;
@@ -166,11 +170,15 @@ function useMarqueeSelection({
     }[] | null = null;
     let prevSelectionKey = selectedPathsRef.current.join("\0");
 
-    const buildCachedItems = (c: HTMLDivElement) => {
+    const buildCachedItems = (
+      c: HTMLDivElement,
+      previousItems: NonNullable<typeof cachedItems> = []
+    ) => {
       const cRect = c.getBoundingClientRect();
       const sLeft = c.scrollLeft;
       const sTop = c.scrollTop;
       const nodes = c.querySelectorAll<HTMLElement>("[data-entry-path]");
+      const itemsByPath = new Map(previousItems.map((item) => [item.path, item]));
       const list: {
         path: string;
         left: number;
@@ -185,7 +193,7 @@ function useMarqueeSelection({
         if (nRect.width <= 0 || nRect.height <= 0) return;
         const left = nRect.left - cRect.left + sLeft;
         const top = nRect.top - cRect.top + sTop;
-        list.push({
+        itemsByPath.set(p, {
           path: p,
           left,
           top,
@@ -193,7 +201,7 @@ function useMarqueeSelection({
           bottom: top + nRect.height,
         });
       });
-      return list;
+      return Array.from(itemsByPath.values());
     };
 
     const updateMarquee = (clientX: number, clientY: number) => {
@@ -286,7 +294,7 @@ function useMarqueeSelection({
       }
 
       if (scrolled) {
-        cachedItems = buildCachedItems(c);
+        cachedItems = buildCachedItems(c, cachedItems || []);
         updateMarquee(lastClientX, lastClientY);
       }
       autoScrollFrame = requestAnimationFrame(tickAutoScroll);
@@ -338,7 +346,7 @@ function useMarqueeSelection({
         // Plain click without marquee drag
         if (clickedEntryPath && onClickEntryFallbackRef.current) {
           onClickEntryFallbackRef.current(clickedEntryPath, {
-            metaOrCtrl: ev.metaKey || ev.ctrlKey,
+            ctrlKey: ev.ctrlKey,
             shift: ev.shiftKey,
           });
         } else if (!additive) {
@@ -379,6 +387,7 @@ const FAST_COLLATOR = new Intl.Collator(undefined, {
   numeric: true,
   sensitivity: "base",
 });
+const LIST_VIRTUALIZATION_THRESHOLD = 150;
 
 interface IconViewItemProps {
   entry: FileEntry;
@@ -441,7 +450,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
         <div
           data-drag-handle="true"
           onMouseDown={(e) => onStartItemDrag(e, entry)}
-          className={`p-2 rounded-xl transition-colors duration-75 ${
+          className={`p-2 rounded-xl ${
             isDropTarget
               ? "bg-[#0a84ff]/25"
               : isSelected
@@ -457,7 +466,9 @@ const IconViewItem = React.memo<IconViewItemProps>(
         {/* Label pill */}
         {isRenaming ? (
           <input
+            data-rename-input
             autoFocus
+            onFocus={(e) => e.target.select()}
             value={renameValue}
             onChange={(e) => onRenameChange(e.target.value)}
             onKeyDown={(e) => {
@@ -467,7 +478,12 @@ const IconViewItem = React.memo<IconViewItemProps>(
             onBlur={onRenameSubmit}
             onClick={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
-            className="mt-1.5 w-full text-center text-xs px-1.5 py-0.5 rounded bg-[#0a84ff]/20 border border-[#0a84ff] outline-none"
+            style={{
+              fontSize: "12px",
+              lineHeight: "1.25",
+              color: isSelected ? (darkMode ? "rgba(255,255,255,.9)" : "#18181b") : undefined,
+            }}
+            className="mt-1.5 w-full min-w-0 text-center leading-tight px-2 py-0.5 rounded-md bg-transparent border-0 outline-none shadow-none focus:ring-0"
           />
         ) : (
           <div
@@ -476,7 +492,11 @@ const IconViewItem = React.memo<IconViewItemProps>(
             onClick={(e) => e.stopPropagation()}
             className={`mt-1.5 px-2 py-0.5 rounded-md text-[12px] leading-tight text-center max-w-full flex items-center justify-center gap-1 ${
               isDropTarget || isSelected
-                ? "bg-[#0058d0] text-white font-medium"
+                ? isDropTarget
+                  ? "bg-[#0a84ff]/25 text-white font-medium"
+                  : darkMode
+                  ? "bg-white/15 text-white font-medium"
+                  : "bg-black/10 text-zinc-900 font-medium"
                 : darkMode
                 ? "text-zinc-200"
                 : "text-zinc-800"
@@ -546,6 +566,7 @@ export const IconView: React.FC<CommonViewProps> = ({
   return (
     <div
       ref={containerRef}
+      data-tab-scroll-view="icons"
       onMouseDown={handleContainerMouseDown}
       onDragStart={(e) => e.preventDefault()}
       onContextMenu={(e) => onContextMenu(e, undefined)}
@@ -687,7 +708,10 @@ const ListViewRow = React.memo<ListViewRowProps>(
         data-entry-path={entry.path}
         data-drop-path={entry.isDir ? entry.path : undefined}
         data-drop-name={entry.isDir ? entry.name : undefined}
-        style={{ height: rowHeight, fontSize: `${fontSize}px` }}
+        style={{
+          height: rowHeight,
+          fontSize: `${fontSize}px`,
+        }}
         onMouseEnter={() => {
           if (entry.isDir) {
             onPrefetchDir(entry.path);
@@ -698,7 +722,7 @@ const ListViewRow = React.memo<ListViewRowProps>(
           if (target?.closest("[data-disclosure-arrow]")) {
             return;
           }
-          if (isSelected && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+          if (isSelected && !e.ctrlKey && !e.shiftKey) {
             onStartRowDrag(e, entry);
           }
         }}
@@ -717,13 +741,15 @@ const ListViewRow = React.memo<ListViewRowProps>(
           e.stopPropagation();
           onContextMenu(e, entry);
         }}
-        className={`list-view-row w-full flex items-center cursor-default select-none transition-colors duration-75 ${
+        className={`list-view-row w-full flex items-center cursor-default select-none ${
           entry.isHidden ? "opacity-55" : ""
         } ${isBeingDragged ? "opacity-45" : ""} ${
           isDropTarget
             ? "bg-[#0a84ff]/35 text-white ring-2 ring-inset ring-[#0a84ff]"
             : isSelected
-            ? "bg-[#0058d0] text-white"
+            ? darkMode
+              ? "bg-white/15 text-white/90"
+              : "bg-black/10 text-zinc-900"
             : rowIndex % 2 === 1
             ? darkMode
               ? "bg-white/[0.025] hover:bg-white/[0.05]"
@@ -780,7 +806,9 @@ const ListViewRow = React.memo<ListViewRowProps>(
             <FileIcon entry={entry} size={rowIconSize} />
             {isRenaming ? (
               <input
+                data-rename-input
                 autoFocus
+                onFocus={(e) => e.target.select()}
                 value={renameValue}
                 onChange={(e) => onRenameChange(e.target.value)}
                 onKeyDown={(e) => {
@@ -790,7 +818,8 @@ const ListViewRow = React.memo<ListViewRowProps>(
                 onBlur={onRenameSubmit}
                 onClick={(e) => e.stopPropagation()}
                 onMouseDown={(e) => e.stopPropagation()}
-                className="px-1.5 py-0.5 rounded bg-black/30 text-white border border-[#0a84ff] outline-none text-xs"
+                style={{ fontSize: "inherit", lineHeight: "inherit", color: "inherit" }}
+                className="min-w-0 bg-transparent border-0 outline-none shadow-none focus:ring-0 p-0"
               />
             ) : (
               <span className="truncate max-w-[340px] font-medium">
@@ -870,6 +899,9 @@ export const ListView: React.FC<CommonViewProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [dirCache, setDirCache] = useState<Record<string, FileEntry[]>>({});
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(600);
+  const scrollFrameRef = useRef<number | null>(null);
 
   const currentFolderKey = entries[0]?.path
     ? entries[0].path.slice(0, Math.max(1, entries[0].path.lastIndexOf("/")))
@@ -971,7 +1003,8 @@ export const ListView: React.FC<CommonViewProps> = ({
     return result;
   }, [dirCache, sortField, sortDirection]);
 
-  // Flat list of all visible rows in order (for Shift+Click range selection)
+  // Keep selection order flat for range selection. Build the richer virtual row
+  // model only when the list is large enough to need virtualization.
   const visibleEntries = useMemo(() => {
     const list: FileEntry[] = [];
     const visit = (items: FileEntry[]) => {
@@ -985,6 +1018,120 @@ export const ListView: React.FC<CommonViewProps> = ({
     visit(entries);
     return list;
   }, [entries, expandedPaths, sortedDirCache]);
+  const renderedRowCount = useMemo(() => {
+    let count = 0;
+    const visit = (items: FileEntry[]) => {
+      for (const item of items) {
+        count++;
+        const cachedChildren = sortedDirCache[item.path];
+        // The animated tree keeps cached children mounted while a folder is
+        // collapsed, so count them when deciding whether to virtualize.
+        if (item.isDir && cachedChildren) visit(cachedChildren);
+      }
+    };
+    visit(entries);
+    return count;
+  }, [entries, sortedDirCache]);
+  const isLargeList = renderedRowCount > LIST_VIRTUALIZATION_THRESHOLD;
+
+  const virtualRows = useMemo(() => {
+    if (!isLargeList) return [];
+    const list: {
+      entry: FileEntry | null;
+      depth: number;
+      rowIndex: number;
+      placeholder?: string;
+    }[] = [];
+    const visit = (items: FileEntry[], depth: number) => {
+      for (const item of items) {
+        list.push({ entry: item, depth, rowIndex: list.length });
+        if (expandedPaths.has(item.path)) {
+          const children = sortedDirCache[item.path];
+          if (children === undefined || children.length === 0) {
+            list.push({
+              entry: null,
+              depth: depth + 1,
+              rowIndex: list.length,
+              placeholder: children === undefined ? "Loading..." : "Zero items",
+            });
+          } else {
+            visit(children, depth + 1);
+          }
+        }
+      }
+    };
+    visit(entries, 0);
+    return list;
+  }, [entries, expandedPaths, isLargeList, sortedDirCache]);
+
+  useEffect(() => {
+    if (!isLargeList) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const updateHeight = () => {
+      setViewportHeight(container.clientHeight);
+      setScrollTop(container.scrollTop);
+    };
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [isLargeList]);
+
+  const handleListScroll = useCallback(() => {
+    if (!isLargeList) return;
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      setScrollTop(containerRef.current?.scrollTop || 0);
+    });
+  }, [isLargeList]);
+
+  const handleListWheel = useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      if (!isLargeList || event.ctrlKey || event.metaKey) return;
+      if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+
+      const container = containerRef.current;
+      if (!container) return;
+
+      const deltaScale =
+        event.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? rowHeight
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? container.clientHeight
+          : 1;
+      const rawDelta = event.deltaY * deltaScale;
+      const limitedDelta = Math.sign(rawDelta) * Math.min(Math.abs(rawDelta) * 0.65, 42);
+
+      event.preventDefault();
+      container.scrollTop += limitedDelta;
+    },
+    [isLargeList, rowHeight]
+  );
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) {
+        cancelAnimationFrame(scrollFrameRef.current);
+      }
+    },
+    []
+  );
+
+  const headerHeight = 28;
+  const overscan = 12;
+  const firstVisibleRow = Math.max(
+    0,
+    Math.floor((scrollTop - headerHeight) / rowHeight) - overscan
+  );
+  const lastVisibleRow = Math.min(
+    virtualRows.length,
+    Math.ceil((scrollTop + viewportHeight - headerHeight) / rowHeight) + overscan
+  );
+  const renderedRows = isLargeList
+    ? virtualRows.slice(firstVisibleRow, lastVisibleRow)
+    : [];
 
   const visibleEntriesRef = useRef<FileEntry[]>(visibleEntries);
   visibleEntriesRef.current = visibleEntries;
@@ -1075,20 +1222,13 @@ export const ListView: React.FC<CommonViewProps> = ({
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const draggedSet = useMemo(() => new Set(draggedPaths), [draggedPaths]);
 
-  const renderRow = (
+  const renderAnimatedRow = (
     entry: FileEntry,
     depth = 0,
     rowIndex = 0
   ): React.ReactNode => {
-    const isSelected = selectedSet.has(entry.path);
-    const isRenaming = renamingPath === entry.path;
     const isExpanded = expandedPaths.has(entry.path);
-    const cachedChildren = sortedDirCache[entry.path];
-    const hasLoadedChildren = cachedChildren !== undefined;
-    const children = cachedChildren || [];
-    const isDropTarget = entry.isDir && dropTargetPath === entry.path;
-    const isBeingDragged = draggedSet.has(entry.path);
-
+    const children = sortedDirCache[entry.path];
     return (
       <div key={entry.path} className="w-full flex flex-col">
         <ListViewRow
@@ -1098,11 +1238,11 @@ export const ListView: React.FC<CommonViewProps> = ({
           rowHeight={rowHeight}
           rowIconSize={rowIconSize}
           fontSize={fontSize}
-          isSelected={isSelected}
-          isRenaming={isRenaming}
+          isSelected={selectedSet.has(entry.path)}
+          isRenaming={renamingPath === entry.path}
           isExpanded={isExpanded}
-          isDropTarget={isDropTarget}
-          isBeingDragged={isBeingDragged}
+          isDropTarget={entry.isDir && dropTargetPath === entry.path}
+          isBeingDragged={draggedSet.has(entry.path)}
           darkMode={darkMode}
           renameValue={renameValue}
           onOpenEntry={onOpenEntry}
@@ -1115,34 +1255,24 @@ export const ListView: React.FC<CommonViewProps> = ({
           onRenameCancel={onRenameCancel}
         />
         {entry.isDir && (
-          <div
-            className={`folder-unfold-grid ${isExpanded ? "is-expanded" : ""}`}
-          >
+          <div className={`folder-unfold-grid ${isExpanded ? "is-expanded" : ""}`}>
             <div className="folder-unfold-inner">
-              {!hasLoadedChildren ? (
+              {children === undefined ? (
                 <div
                   className="flex items-center text-xs opacity-40 italic select-none"
-                  style={{
-                    height: rowHeight,
-                    paddingLeft: `${(depth + 1) * 18 + 34}px`,
-                  }}
+                  style={{ height: rowHeight, paddingLeft: `${(depth + 1) * 18 + 34}px` }}
                 >
                   Loading...
                 </div>
               ) : children.length === 0 ? (
                 <div
                   className="flex items-center text-xs opacity-40 italic select-none"
-                  style={{
-                    height: rowHeight,
-                    paddingLeft: `${(depth + 1) * 18 + 34}px`,
-                  }}
+                  style={{ height: rowHeight, paddingLeft: `${(depth + 1) * 18 + 34}px` }}
                 >
                   Zero items
                 </div>
               ) : (
-                children.map((child, idx) =>
-                  renderRow(child, depth + 1, idx)
-                )
+                children.map((child, idx) => renderAnimatedRow(child, depth + 1, idx))
               )}
             </div>
           </div>
@@ -1163,6 +1293,9 @@ export const ListView: React.FC<CommonViewProps> = ({
   return (
     <div
       ref={containerRef}
+      data-tab-scroll-view="list"
+      onScroll={handleListScroll}
+      onWheel={handleListWheel}
       onMouseDown={handleContainerMouseDown}
       onDragStart={(e) => e.preventDefault()}
       onContextMenu={(e) => onContextMenu(e, undefined)}
@@ -1173,8 +1306,8 @@ export const ListView: React.FC<CommonViewProps> = ({
         <div
           className={`sticky top-0 z-10 flex items-center h-7 text-[11px] font-semibold border-b select-none ${
             darkMode
-              ? "bg-[#222226]/95 border-white/10 text-zinc-400"
-              : "bg-[#f5f5f7]/95 border-black/10 text-zinc-500"
+              ? "bg-[#202024] border-white/10 text-zinc-400"
+              : "bg-[#f2f2f5] border-black/10 text-zinc-500"
           }`}
         >
           <div
@@ -1203,10 +1336,64 @@ export const ListView: React.FC<CommonViewProps> = ({
           </div>
         </div>
 
-        {/* Complete Smooth Row List with Folder Accordion Unfolding */}
-        <div className="w-full flex flex-col">
-          {entries.map((item, idx) => renderRow(item, 0, idx))}
-        </div>
+        {isLargeList ? (
+          // Only mount rows around the viewport; the spacer preserves scroll height.
+          <div
+            className="relative w-full"
+            style={{ height: virtualRows.length * rowHeight }}
+          >
+            {renderedRows.map((row) => {
+              const { entry, depth, rowIndex } = row;
+              return (
+                <div
+                  key={entry?.path || `placeholder-${rowIndex}`}
+                  className="absolute inset-x-0"
+                  style={{ top: rowIndex * rowHeight, height: rowHeight }}
+                >
+                  {entry ? (
+                    <ListViewRow
+                      entry={entry}
+                      depth={depth}
+                      rowIndex={rowIndex}
+                      rowHeight={rowHeight}
+                      rowIconSize={rowIconSize}
+                      fontSize={fontSize}
+                      isSelected={selectedSet.has(entry.path)}
+                      isRenaming={renamingPath === entry.path}
+                      isExpanded={expandedPaths.has(entry.path)}
+                      isDropTarget={entry.isDir && dropTargetPath === entry.path}
+                      isBeingDragged={draggedSet.has(entry.path)}
+                      darkMode={darkMode}
+                      renameValue={renameValue}
+                      onOpenEntry={onOpenEntry}
+                      onContextMenu={onContextMenu}
+                      onStartRowDrag={handleStartRowDrag}
+                      onToggleExpandDir={toggleExpandDir}
+                      onPrefetchDir={prefetchDir}
+                      onRenameChange={onRenameChange}
+                      onRenameSubmit={onRenameSubmit}
+                      onRenameCancel={onRenameCancel}
+                    />
+                  ) : (
+                    <div
+                      className="flex items-center text-xs opacity-40 italic select-none"
+                      style={{
+                        height: rowHeight,
+                        paddingLeft: `${depth * 18 + 34}px`,
+                      }}
+                    >
+                      {row.placeholder}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="w-full flex flex-col">
+            {entries.map((item, idx) => renderAnimatedRow(item, 0, idx))}
+          </div>
+        )}
       </div>
 
       {entries.length === 0 && (
@@ -1240,6 +1427,163 @@ interface ColumnPane {
   selectedEntry: FileEntry | null;
 }
 
+const ColumnPaneRow: React.FC<{
+  entry: FileEntry;
+  colIdx: number;
+  colFontSize: number;
+  rowPadY: number;
+  colIconSize: number;
+  isSelected: boolean;
+  isRenaming: boolean;
+  isDropTarget: boolean;
+  isBeingDragged: boolean;
+  darkMode: boolean;
+  renameValue?: string;
+  onRenameChange?: (val: string) => void;
+  onRenameSubmit?: () => void;
+  onRenameCancel?: () => void;
+  onActivateEntry: (
+    colIdx: number,
+    entry: FileEntry,
+    modifiers: SelectionModifiers
+  ) => void;
+  onOpenEntry: (entry: FileEntry) => void;
+  onContextMenu: (
+    e: React.MouseEvent,
+    entry?: FileEntry,
+    targetDir?: string
+  ) => void;
+  onStartItemDrag: (
+    e: React.MouseEvent,
+    entry: FileEntry,
+    orderedEntries?: FileEntry[],
+    onClickOverride?: (entry: FileEntry, modifiers: SelectionModifiers) => void
+  ) => void;
+  colEntries: FileEntry[];
+  colPath: string;
+}> = ({
+  entry,
+  colIdx,
+  colFontSize,
+  rowPadY,
+  colIconSize,
+  isSelected,
+  isRenaming,
+  isDropTarget,
+  isBeingDragged,
+  darkMode,
+  renameValue,
+  onRenameChange,
+  onRenameSubmit,
+  onRenameCancel,
+  onActivateEntry,
+  onOpenEntry,
+  onContextMenu,
+  onStartItemDrag,
+  colEntries,
+  colPath,
+}) => {
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (isRenaming && rowRef.current) {
+      rowRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [isRenaming]);
+
+  return (
+    <div
+      ref={rowRef}
+      key={entry.path}
+      data-entry-path={entry.path}
+      data-drop-path={entry.isDir ? entry.path : undefined}
+      data-drop-name={entry.isDir ? entry.name : undefined}
+      style={{
+        fontSize: `${colFontSize}px`,
+        paddingTop: rowPadY,
+        paddingBottom: rowPadY,
+      }}
+      onMouseDown={(e) => {
+        if (!isRenaming && isSelected && !e.ctrlKey && !e.shiftKey) {
+          onStartItemDrag(
+            e,
+            entry,
+            colEntries,
+            (clicked, mods) => onActivateEntry(colIdx, clicked, mods)
+          );
+        }
+      }}
+      onDoubleClick={() => {
+        if (!isRenaming) onOpenEntry(entry);
+      }}
+      onContextMenu={(e) => {
+        e.stopPropagation();
+        onContextMenu(e, entry, colPath);
+      }}
+      className={`flex items-center justify-between px-2.5 mx-1 rounded-md cursor-default ${
+        entry.isHidden ? "opacity-55" : ""
+      } ${isBeingDragged ? "opacity-45" : ""} ${
+        isDropTarget
+          ? "bg-[#0a84ff]/35 text-white ring-2 ring-[#0a84ff]"
+          : isSelected
+          ? darkMode
+            ? "bg-white/15 text-white/90"
+            : "bg-black/10 text-zinc-900"
+          : darkMode
+          ? "hover:bg-white/[0.06]"
+          : "hover:bg-black/[0.05]"
+      }`}
+    >
+      <div
+        data-drag-handle={!isRenaming ? "true" : undefined}
+        onMouseDown={(e) => {
+          if (!isRenaming) {
+            onStartItemDrag(
+              e,
+              entry,
+              colEntries,
+              (clicked, mods) => onActivateEntry(colIdx, clicked, mods)
+            );
+          }
+        }}
+        className="flex items-center gap-2 min-w-0 flex-1 mr-1"
+      >
+        <FileIcon entry={entry} size={colIconSize} />
+        {isRenaming ? (
+          <input
+            data-rename-input
+            autoFocus
+            value={renameValue || ""}
+            onChange={(e) => onRenameChange?.(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onRenameSubmit?.();
+              if (e.key === "Escape") onRenameCancel?.();
+            }}
+            onFocus={(e) => e.target.select()}
+            onBlur={onRenameSubmit}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{ fontSize: "inherit", lineHeight: "inherit", color: "inherit" }}
+            className="w-full min-w-0 bg-transparent border-0 outline-none shadow-none focus:ring-0 p-0 font-medium"
+          />
+        ) : (
+          <span className="truncate">{entry.name}</span>
+        )}
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <TagDots tags={entry.tags} />
+        {entry.isDir && (
+          <ChevronRight
+            className={`w-3.5 h-3.5 ${
+              isSelected || isDropTarget ? "text-white" : "opacity-40"
+            }`}
+          />
+        )}
+      </div>
+    </div>
+  );
+};
+
 const ColumnPaneView: React.FC<{
   col: ColumnPane;
   colIdx: number;
@@ -1249,6 +1593,12 @@ const ColumnPaneView: React.FC<{
   dropTargetPath: string | null;
   draggedPaths: string[];
   darkMode: boolean;
+  renamingPath?: string | null;
+  renameValue?: string;
+  onRenameChange?: (val: string) => void;
+  onRenameSubmit?: () => void;
+  onRenameCancel?: () => void;
+  onFocusColumn?: (colIdx: number) => void;
   onActivateEntry: (
     colIdx: number,
     entry: FileEntry,
@@ -1257,7 +1607,11 @@ const ColumnPaneView: React.FC<{
   onSetSelection: (paths: string[]) => void;
   onClearSelection: () => void;
   onOpenEntry: (entry: FileEntry) => void;
-  onContextMenu: (e: React.MouseEvent, entry?: FileEntry) => void;
+  onContextMenu: (
+    e: React.MouseEvent,
+    entry?: FileEntry,
+    targetDir?: string
+  ) => void;
   onStartItemDrag: (
     e: React.MouseEvent,
     entry: FileEntry,
@@ -1273,6 +1627,12 @@ const ColumnPaneView: React.FC<{
   dropTargetPath,
   draggedPaths,
   darkMode,
+  renamingPath,
+  renameValue,
+  onRenameChange,
+  onRenameSubmit,
+  onRenameCancel,
+  onFocusColumn,
   onActivateEntry,
   onSetSelection,
   onClearSelection,
@@ -1322,14 +1682,51 @@ const ColumnPaneView: React.FC<{
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const draggedSet = useMemo(() => new Set(draggedPaths), [draggedPaths]);
 
+  // Ensure an item being created/renamed appears immediately in its column even before directory refresh
+  const displayEntries = useMemo(() => {
+    if (
+      renamingPath &&
+      renamingPath.startsWith(col.path === "/" ? "/" : col.path + "/")
+    ) {
+      const remainder =
+        col.path === "/"
+          ? renamingPath.slice(1)
+          : renamingPath.slice(col.path.length + 1);
+      if (!remainder.includes("/") && !col.entries.some((e) => e.path === renamingPath)) {
+        const tempEntry: FileEntry = {
+          name: renameValue || remainder,
+          path: renamingPath,
+          isDir: !remainder.includes(".") || remainder.endsWith("/"),
+          isSymlink: false,
+          isHidden: remainder.startsWith("."),
+          size: 0,
+          modified: Date.now() / 1000,
+          created: Date.now() / 1000,
+          extension: remainder.includes(".") ? remainder.split(".").pop() || "" : "",
+          kind: "Folder",
+          mimeType: "inode/directory",
+          permissions: "rwxr-xr-x",
+          isReadonly: false,
+          childCount: 0,
+          tags: [],
+        };
+        return [tempEntry, ...col.entries];
+      }
+    }
+    return col.entries;
+  }, [col.entries, col.path, renamingPath, renameValue]);
+
   return (
     <div
       ref={paneRef}
       style={{ width: colWidth }}
       data-drop-path={col.path !== "__RECENTS__" ? col.path : undefined}
       data-drop-name={colFolderName}
-      onMouseDown={handleContainerMouseDown}
-      onContextMenu={(e) => onContextMenu(e, undefined)}
+      onMouseDown={(e) => {
+        onFocusColumn?.(colIdx);
+        handleContainerMouseDown(e);
+      }}
+      onContextMenu={(e) => onContextMenu(e, undefined, col.path)}
       className={`relative shrink-0 border-r overflow-y-auto py-1 select-none transition-colors ${
         darkMode ? "border-white/10" : "border-black/10"
       } ${
@@ -1338,84 +1735,39 @@ const ColumnPaneView: React.FC<{
           : ""
       }`}
     >
-      {col.entries.length === 0 ? (
+      {displayEntries.length === 0 ? (
         <div className="h-full flex items-center justify-center text-xs opacity-40 pointer-events-none">
           Empty Folder
         </div>
       ) : (
-        col.entries.map((entry) => {
-          const isSelected =
-            selectedSet.has(entry.path) ||
-            col.selectedEntry?.path === entry.path;
-          const isDropTarget = entry.isDir && dropTargetPath === entry.path;
-          const isBeingDragged = draggedSet.has(entry.path);
-
-          return (
-            <div
-              key={entry.path}
-              data-entry-path={entry.path}
-              data-drop-path={entry.isDir ? entry.path : undefined}
-              data-drop-name={entry.isDir ? entry.name : undefined}
-              style={{
-                fontSize: `${colFontSize}px`,
-                paddingTop: rowPadY,
-                paddingBottom: rowPadY,
-              }}
-              onMouseDown={(e) => {
-                if (isSelected && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
-                  onStartItemDrag(
-                    e,
-                    entry,
-                    col.entries,
-                    (clicked, mods) => onActivateEntry(colIdx, clicked, mods)
-                  );
-                }
-              }}
-              onDoubleClick={() => onOpenEntry(entry)}
-              onContextMenu={(e) => {
-                e.stopPropagation();
-                onContextMenu(e, entry);
-              }}
-              className={`flex items-center justify-between px-2.5 mx-1 rounded-md cursor-default ${
-                entry.isHidden ? "opacity-55" : ""
-              } ${isBeingDragged ? "opacity-45" : ""} ${
-                isDropTarget
-                  ? "bg-[#0a84ff]/35 text-white ring-2 ring-[#0a84ff]"
-                  : isSelected
-                  ? "bg-[#0058d0] text-white"
-                  : darkMode
-                  ? "hover:bg-white/[0.06]"
-                  : "hover:bg-black/[0.05]"
-              }`}
-            >
-              <div
-                data-drag-handle="true"
-                onMouseDown={(e) =>
-                  onStartItemDrag(
-                    e,
-                    entry,
-                    col.entries,
-                    (clicked, mods) => onActivateEntry(colIdx, clicked, mods)
-                  )
-                }
-                className="flex items-center gap-2 min-w-0"
-              >
-                <FileIcon entry={entry} size={colIconSize} />
-                <span className="truncate">{entry.name}</span>
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <TagDots tags={entry.tags} />
-                {entry.isDir && (
-                  <ChevronRight
-                    className={`w-3.5 h-3.5 ${
-                      isSelected || isDropTarget ? "text-white" : "opacity-40"
-                    }`}
-                  />
-                )}
-              </div>
-            </div>
-          );
-        })
+        displayEntries.map((entry) => (
+          <ColumnPaneRow
+            key={entry.path}
+            entry={entry}
+            colIdx={colIdx}
+            colFontSize={colFontSize}
+            rowPadY={rowPadY}
+            colIconSize={colIconSize}
+            isSelected={
+              selectedSet.has(entry.path) ||
+              col.selectedEntry?.path === entry.path
+            }
+            isRenaming={renamingPath === entry.path}
+            isDropTarget={entry.isDir && dropTargetPath === entry.path}
+            isBeingDragged={draggedSet.has(entry.path)}
+            darkMode={darkMode}
+            renameValue={renameValue}
+            onRenameChange={onRenameChange}
+            onRenameSubmit={onRenameSubmit}
+            onRenameCancel={onRenameCancel}
+            onActivateEntry={onActivateEntry}
+            onOpenEntry={onOpenEntry}
+            onContextMenu={onContextMenu}
+            onStartItemDrag={onStartItemDrag}
+            colEntries={col.entries}
+            colPath={col.path}
+          />
+        ))
       )}
 
       {marqueeRect && (
@@ -1434,7 +1786,11 @@ const ColumnPaneView: React.FC<{
 };
 
 export const ColumnView: React.FC<
-  CommonViewProps & { currentPath: string; rootPartitionName?: string }
+  CommonViewProps & {
+    currentPath: string;
+    rootPartitionName?: string;
+    onActiveDirectoryChange?: (path: string) => void;
+  }
 > = ({
   currentPath,
   rootPartitionName,
@@ -1449,11 +1805,17 @@ export const ColumnView: React.FC<
   dropTargetPath,
   draggedPaths,
   refreshVersion,
+  renamingPath,
+  renameValue,
+  onRenameChange,
+  onRenameSubmit,
+  onRenameCancel,
   iconSize,
   darkMode,
   showHidden,
   onToggleTag,
   onQuickLook,
+  onActiveDirectoryChange,
 }) => {
   const [columns, setColumns] = useState<ColumnPane[]>(() => [
     {
@@ -1462,6 +1824,10 @@ export const ColumnView: React.FC<
       selectedEntry: null,
     },
   ]);
+  const columnsRef = useRef<ColumnPane[]>(columns);
+  columnsRef.current = columns;
+
+  const [activeColIndex, setActiveColIndex] = useState<number>(0);
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const zoomScale = iconSize / 64;
   const inspectorIconSize = Math.max(
@@ -1473,10 +1839,22 @@ export const ColumnView: React.FC<
     Math.min(280, Math.round(176 * zoomScale))
   );
 
+  // Compute active directory in the columns cascade and notify parent
+  const activeColPath = useMemo(() => {
+    if (columns.length === 0) return currentPath;
+    const col = columns[activeColIndex] || columns[columns.length - 1];
+    return col ? col.path : currentPath;
+  }, [columns, activeColIndex, currentPath]);
+
+  useEffect(() => {
+    onActiveDirectoryChange?.(activeColPath);
+  }, [activeColPath, onActiveDirectoryChange]);
+
   // Reset root column when currentPath changes, or update root entries
   useEffect(() => {
     setColumns((prev) => {
       if (prev.length === 0 || prev[0].path !== currentPath) {
+        setActiveColIndex(0);
         return [
           {
             path: currentPath,
@@ -1491,12 +1869,12 @@ export const ColumnView: React.FC<
     });
   }, [currentPath, entries]);
 
-  // Refresh sub-columns when files are moved/copied/created
+  // Refresh sub-columns when files are moved/copied/created/renamed
   useEffect(() => {
-    if (columns.length <= 1) return;
+    if (columnsRef.current.length <= 1) return;
     let cancelled = false;
     Promise.all(
-      columns.slice(1).map(async (col) => {
+      columnsRef.current.slice(1).map(async (col) => {
         try {
           const sub = await apiReadDirectory(col.path, showHidden);
           return { path: col.path, entries: sub };
@@ -1506,11 +1884,17 @@ export const ColumnView: React.FC<
       })
     ).then((res) => {
       if (cancelled) return;
+      const refreshedByPath = new Map(
+        res
+          .filter((item): item is { path: string; entries: FileEntry[] } =>
+            item !== null
+          )
+          .map((item) => [item.path, item.entries])
+      );
       setColumns((prev) =>
-        prev.map((col, idx) => {
-          if (idx === 0) return col;
-          const updated = res[idx - 1];
-          return updated ? { ...col, entries: updated.entries } : col;
+        prev.map((col) => {
+          const refreshedEntries = refreshedByPath.get(col.path);
+          return refreshedEntries ? { ...col, entries: refreshedEntries } : col;
         })
       );
     });
@@ -1518,6 +1902,21 @@ export const ColumnView: React.FC<
       cancelled = true;
     };
   }, [refreshVersion, showHidden]);
+
+  const handleFocusColumn = useCallback(
+    (colIdx: number) => {
+      setActiveColIndex(colIdx);
+      onClearSelection();
+      setColumns((prev) => {
+        if (colIdx >= prev.length - 1) return prev;
+        return prev.slice(0, colIdx + 1).map((c, i) =>
+          i === colIdx ? { ...c, selectedEntry: null } : c
+        );
+      });
+      setPreview(null);
+    },
+    [onClearSelection]
+  );
 
   const handleSelectInColumn = useCallback(
     async (
@@ -1529,7 +1928,7 @@ export const ColumnView: React.FC<
       onSelect(entry, modifiers, colEntries);
 
       // If multi-selecting with Ctrl/Cmd or Shift, keep current column cascade
-      if (modifiers.metaOrCtrl || modifiers.shift) {
+      if (modifiers.ctrlKey || modifiers.shift) {
         return;
       }
 
@@ -1541,6 +1940,7 @@ export const ColumnView: React.FC<
 
       if (entry.isDir) {
         setPreview(null);
+        setActiveColIndex(colIndex + 1);
         try {
           const subEntries = await apiReadDirectory(entry.path, showHidden);
           updated.push({
@@ -1553,6 +1953,7 @@ export const ColumnView: React.FC<
         }
         setColumns(updated);
       } else {
+        setActiveColIndex(colIndex);
         setColumns(updated);
         try {
           const p = await apiReadFilePreview(entry.path, 32768);
@@ -1573,6 +1974,7 @@ export const ColumnView: React.FC<
 
   return (
     <div
+      data-tab-scroll-view="columns"
       onDragStart={(e) => e.preventDefault()}
       className="macos-layer-isolate flex-1 flex overflow-x-auto overflow-y-hidden"
     >
@@ -1587,6 +1989,12 @@ export const ColumnView: React.FC<
           dropTargetPath={dropTargetPath}
           draggedPaths={draggedPaths}
           darkMode={darkMode}
+          renamingPath={renamingPath}
+          renameValue={renameValue}
+          onRenameChange={onRenameChange}
+          onRenameSubmit={onRenameSubmit}
+          onRenameCancel={onRenameCancel}
+          onFocusColumn={handleFocusColumn}
           onActivateEntry={handleSelectInColumn}
           onSetSelection={onSetSelection}
           onClearSelection={onClearSelection}
@@ -1814,6 +2222,7 @@ export const GalleryView: React.FC<CommonViewProps> = ({
 
         {/* Bottom Horizontal Filmstrip */}
         <div
+          data-tab-scroll-view="gallery"
           style={{ height: stripHeight }}
           className={`border-t px-4 flex items-center gap-3 overflow-x-auto ${
             darkMode
@@ -1844,7 +2253,9 @@ export const GalleryView: React.FC<CommonViewProps> = ({
                   isDropTarget
                     ? "bg-[#0a84ff]/35 ring-2 ring-[#0a84ff]"
                     : isSelected
-                    ? "bg-[#0058d0]/25 ring-2 ring-[#0a84ff]"
+                    ? darkMode
+                      ? "bg-white/15"
+                      : "bg-black/10"
                     : "hover:bg-white/5 opacity-75 hover:opacity-100"
                 }`}
               >

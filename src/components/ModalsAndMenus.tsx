@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   X,
   ExternalLink,
@@ -38,6 +38,7 @@ import {
 } from "../types";
 import { FileIcon } from "./FileIcon";
 import { apiReadFilePreview, apiGetAvailableFormatTypes } from "../api";
+import { useToolbarOutsideDismiss } from "./useToolbarOutsideDismiss";
 
 /* ============================================================================
  * 1. QUICK LOOK MODAL (Spacebar Preview)
@@ -57,6 +58,8 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
 }) => {
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [loading, setLoading] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useToolbarOutsideDismiss(dialogRef, Boolean(entry), onClose);
 
   useEffect(() => {
     if (!entry) return;
@@ -71,10 +74,13 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
 
   return (
     <div
-      onClick={onClose}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-8"
     >
       <div
+        ref={dialogRef}
         onClick={(e) => e.stopPropagation()}
         className={`w-full max-w-3xl h-[540px] rounded-2xl border shadow-2xl flex flex-col overflow-hidden backdrop-blur-2xl ${
           darkMode
@@ -168,7 +174,7 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
 };
 
 /* ============================================================================
- * 2. GET INFO MODAL (Cmd/Ctrl + I macOS Inspector)
+ * 2. GET INFO MODAL (Ctrl + I Inspector)
  * ========================================================================== */
 interface GetInfoModalProps {
   entry: FileEntry | null;
@@ -192,6 +198,8 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
   darkMode,
 }) => {
   const [appInput, setAppInput] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useToolbarOutsideDismiss(dialogRef, Boolean(entry || volume), onClose);
 
   useEffect(() => {
     setAppInput(entry?.defaultApp || "");
@@ -208,10 +216,13 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
 
     return (
       <div
-        onClick={onClose}
+        onMouseDown={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
         className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
       >
         <div
+          ref={dialogRef}
           onClick={(e) => e.stopPropagation()}
           className={`w-88 rounded-2xl border shadow-2xl overflow-hidden backdrop-blur-2xl text-xs ${
             darkMode
@@ -338,10 +349,13 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
 
   return (
     <div
-      onClick={onClose}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
     >
       <div
+        ref={dialogRef}
         onClick={(e) => e.stopPropagation()}
         className={`w-84 rounded-2xl border shadow-2xl overflow-hidden backdrop-blur-2xl text-xs ${
           darkMode
@@ -515,6 +529,7 @@ export interface ContextMenuState {
   x: number;
   y: number;
   entry?: FileEntry;
+  targetDir?: string;
   favorite?: {
     name: string;
     path: string;
@@ -589,6 +604,8 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onFirstAidVolume,
   onToast,
 }) => {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useToolbarOutsideDismiss(menuRef, Boolean(menu), onClose);
   if (!menu) return null;
 
   const entry = menu.entry;
@@ -609,7 +626,9 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
   return (
     <div
-      onClick={onClose}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         onClose();
@@ -617,6 +636,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       className="fixed inset-0 z-50"
     >
       <div
+        ref={menuRef}
         onClick={(e) => e.stopPropagation()}
         style={{ top, left }}
         className={`fixed min-w-60 w-auto max-w-xs p-1.5 rounded-xl border shadow-2xl backdrop-blur-2xl text-xs select-none ${
@@ -663,7 +683,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Info className="w-3.5 h-3.5" />
               <span>Get Info</span>
-              <span className="ml-auto opacity-60 text-[10px]">Super+I</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+I</span>
             </button>
             <div className="my-1 border-t border-current/10" />
             {volume.canUnmount && (
@@ -764,7 +784,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 >
                   <Info className="w-3.5 h-3.5" />
                   <span>Get Info</span>
-                  <span className="ml-auto opacity-60 text-[10px]">Super+I</span>
+                  <span className="ml-auto opacity-60 text-[10px]">Ctrl+I</span>
                 </button>
                 <button
                   onClick={() => {
@@ -840,7 +860,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Info className="w-3.5 h-3.5" />
               <span>Get Info</span>
-              <span className="ml-auto opacity-60 text-[10px]">Super+I</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+I</span>
             </button>
             {!isMultiSelected && (
               <button
@@ -852,7 +872,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               >
                 <Edit3 className="w-3.5 h-3.5" />
                 <span>Rename</span>
-                <span className="ml-auto opacity-60 text-[10px]">Enter</span>
+                <span className="ml-auto opacity-60 text-[10px]">F2</span>
               </button>
             )}
             {entry.isDir && !isMultiSelected && (
@@ -876,7 +896,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Files className="w-3.5 h-3.5" />
               <span>Duplicate{countSuffix}</span>
-              <span className="ml-auto opacity-60 text-[10px]">Super+D</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+D</span>
             </button>
             <div className="my-1 border-t border-current/10" />
             <button
@@ -888,7 +908,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Copy className="w-3.5 h-3.5" />
               <span>Copy{countSuffix}</span>
-              <span className="ml-auto opacity-60 text-[10px]">Super+C</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+C</span>
             </button>
             <button
               onClick={() => {
@@ -899,7 +919,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Scissors className="w-3.5 h-3.5" />
               <span>Cut{countSuffix}</span>
-              <span className="ml-auto opacity-60 text-[10px]">Super+X</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+X</span>
             </button>
             <div className="my-1 border-t border-current/10" />
 
@@ -933,7 +953,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Move to Trash{countSuffix}</span>
-              <span className="ml-auto opacity-60 text-[10px]">Super+Del</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+Del</span>
             </button>
           </>
         ) : (
@@ -947,7 +967,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <FolderPlus className="w-3.5 h-3.5" />
               <span>New Folder</span>
-              <span className="ml-auto opacity-60 text-[10px]">Super+Shift+N</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+Shift+N</span>
             </button>
             <button
               onClick={() => {
@@ -971,7 +991,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 >
                   <ClipboardPaste className="w-3.5 h-3.5" />
                   <span>Paste Item(s) Here</span>
-                  <span className="ml-auto opacity-60 text-[10px]">Super+V</span>
+                  <span className="ml-auto opacity-60 text-[10px]">Ctrl+V</span>
                 </button>
               </>
             )}
@@ -1046,8 +1066,8 @@ export const BottomBars: React.FC<BottomBarsProps> = ({
       onDragStart={(e) => e.preventDefault()}
       className={`macos-layer-isolate select-none text-[11px] border-t ${
         darkMode
-          ? "bg-[#202024]/95 border-white/10 text-zinc-400"
-          : "bg-[#f2f2f5]/95 border-black/10 text-zinc-600"
+          ? "bg-[#202024] border-white/10 text-zinc-400"
+          : "bg-[#f2f2f5] border-black/10 text-zinc-600"
       }`}
     >
       {/* Interactive Breadcrumb Path Bar */}
@@ -1151,6 +1171,8 @@ export const SudoPromptModal: React.FC<SudoPromptModalProps> = ({
 }) => {
   const [password, setPassword] = useState("");
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  useToolbarOutsideDismiss(dialogRef, Boolean(prompt), onCancel, Boolean(prompt?.busy));
 
   useEffect(() => {
     if (prompt) {
@@ -1201,6 +1223,7 @@ export const SudoPromptModal: React.FC<SudoPromptModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
     >
       <form
+        ref={dialogRef}
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
         onSubmit={handleSubmit}
@@ -1319,12 +1342,14 @@ export const FormatModal: React.FC<FormatModalProps> = ({
   darkMode,
 }) => {
   const [label, setLabel] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [fstype, setFstype] = useState("vfat");
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [password, setPassword] = useState("");
+  useToolbarOutsideDismiss(dialogRef, Boolean(volume), onClose, busy);
   const [formatTypes, setFormatTypes] = useState<FormatTypeOption[]>([
     {
       id: "vfat",
@@ -1418,6 +1443,7 @@ export const FormatModal: React.FC<FormatModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
     >
       <div
+        ref={dialogRef}
         onClick={(e) => e.stopPropagation()}
         className={`w-[460px] rounded-2xl border shadow-2xl overflow-hidden backdrop-blur-2xl text-xs select-none ${
           darkMode
@@ -1591,6 +1617,8 @@ export const FirstAidModal: React.FC<FirstAidModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [password, setPassword] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useToolbarOutsideDismiss(dialogRef, Boolean(volume), onClose, running);
 
   useEffect(() => {
     setRunning(false);
@@ -1635,6 +1663,7 @@ export const FirstAidModal: React.FC<FirstAidModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
     >
       <div
+        ref={dialogRef}
         onClick={(e) => e.stopPropagation()}
         className={`w-[520px] rounded-2xl border shadow-2xl overflow-hidden backdrop-blur-2xl text-xs select-none ${
           darkMode
@@ -1777,6 +1806,8 @@ export const OpenWithModal: React.FC<OpenWithModalProps> = ({
   const [program, setProgram] = useState("");
   const [busy, setBusy] = useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLFormElement>(null);
+  useToolbarOutsideDismiss(dialogRef, Boolean(entry), onClose, busy);
 
   useEffect(() => {
     if (entry) {
@@ -1826,6 +1857,7 @@ export const OpenWithModal: React.FC<OpenWithModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
     >
       <form
+        ref={dialogRef}
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {

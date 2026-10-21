@@ -35,32 +35,45 @@ const FAILED_THUMBNAILS = new Set<string>();
 const INFLIGHT_REQUESTS = new Map<string, Promise<string | null>>();
 
 // Concurrent queue for thumbnail generation
-const MAX_CONCURRENT = 6;
+const MAX_CONCURRENT = 2;
 let activeTasks = 0;
-const pendingQueue: Array<() => void> = [];
+const pendingQueue: Array<() => Promise<void>> = [];
+let queueTimer: number | null = null;
 let folderAnimEndTime = 0;
 
 export function markFolderAnimationActive(durationMs = 220) {
   folderAnimEndTime = Math.max(folderAnimEndTime, performance.now() + durationMs);
 }
 
-function enqueueTask(task: () => Promise<void>) {
-  const run = () => {
-    activeTasks++;
-    task().finally(() => {
-      activeTasks--;
-      if (pendingQueue.length > 0) {
-        const next = pendingQueue.shift();
-        next?.();
-      }
-    });
-  };
-
-  if (activeTasks < MAX_CONCURRENT) {
-    run();
-  } else {
-    pendingQueue.push(run);
+function scheduleQueueDrain() {
+  if (
+    queueTimer !== null ||
+    activeTasks >= MAX_CONCURRENT ||
+    pendingQueue.length === 0
+  ) {
+    return;
   }
+
+  // Let the explorer paint and handle input before dispatching more image work.
+  queueTimer = window.setTimeout(() => {
+    queueTimer = null;
+    const task = pendingQueue.shift();
+    if (!task || activeTasks >= MAX_CONCURRENT) return;
+
+    activeTasks++;
+    void task()
+      .catch(() => {})
+      .finally(() => {
+        activeTasks--;
+        scheduleQueueDrain();
+      });
+    scheduleQueueDrain();
+  }, 16);
+}
+
+function enqueueTask(task: () => Promise<void>) {
+  pendingQueue.push(task);
+  scheduleQueueDrain();
 }
 
 function fetchThumbnail(
@@ -160,7 +173,7 @@ function observeThumbnailElement(el: Element, onVisible: () => void): () => void
           }
         }
       },
-      { rootMargin: "180px" }
+      { rootMargin: "80px" }
     );
   }
   observerCallbacks.set(el, onVisible);
@@ -370,7 +383,8 @@ const ImageFileIcon: React.FC<{
             decoding="async"
             draggable={false}
             onError={handleImgError}
-            className="w-full h-full object-cover rounded-[3px] border border-white/25 bg-black/20 shadow-xs pointer-events-none"
+            style={{ filter: "drop-shadow(0 2px 5px rgba(0, 0, 0, 0.55))" }}
+            className="w-full h-full object-cover rounded-[3px] shadow-md pointer-events-none"
           />
         ) : (
           <div className="w-full h-full p-[3px] flex items-center justify-center">
@@ -381,7 +395,8 @@ const ImageFileIcon: React.FC<{
               decoding="async"
               draggable={false}
               onError={handleImgError}
-              className="max-w-full max-h-full object-contain rounded-[4px] border border-white/30 bg-black/20 shadow-md pointer-events-none"
+              style={{ filter: "drop-shadow(0 3px 7px rgba(0, 0, 0, 0.6))" }}
+              className="max-w-full max-h-full object-contain rounded-[4px] shadow-lg pointer-events-none"
             />
           </div>
         )}
