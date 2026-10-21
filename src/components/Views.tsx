@@ -2151,6 +2151,11 @@ export const GalleryView: React.FC<CommonViewProps> = ({
     Boolean(activeEntry?.path) &&
     (Boolean(activeEntry?.mimeType?.startsWith("image/")) ||
       ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "jfif"].includes(ext));
+  const isVideo =
+    Boolean(activeEntry) &&
+    !activeEntry?.isDir &&
+    (Boolean(activeEntry?.mimeType?.startsWith("video/")) ||
+      ["mp4", "m4v", "mkv", "mov", "webm", "avi", "mpeg", "mpg", "3gp"].includes(ext));
 
   const activeImageSrc = useMemo(() => {
     if (!isImage || !activeEntry?.path) return null;
@@ -2166,10 +2171,19 @@ export const GalleryView: React.FC<CommonViewProps> = ({
       setPreview(null);
       return;
     }
+    let cancelled = false;
+    setPreview(null);
     apiReadFilePreview(activeEntry.path, 32768)
-      .then(setPreview)
-      .catch(() => setPreview(null));
-  }, [activeEntry?.path, isImage]);
+      .then((result) => {
+        if (!cancelled) setPreview(result);
+      })
+      .catch(() => {
+        if (!cancelled) setPreview(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeEntry?.path, isImage, isVideo]);
 
   if (!activeEntry) {
     return (
@@ -2198,6 +2212,18 @@ export const GalleryView: React.FC<CommonViewProps> = ({
               alt={activeEntry.name}
               style={{ transform: `scale(${stageImgScale})` }}
               className="max-h-full max-w-full rounded-xl shadow-2xl object-contain transition-transform duration-150"
+            />
+          ) : preview?.previewType === "video" ? (
+            <video
+              key={activeEntry.path}
+              src={convertFileSrc(activeEntry.path)}
+              controls
+              playsInline
+              preload="metadata"
+              onMouseDown={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+              className="max-h-full max-w-full rounded-xl bg-black shadow-2xl"
+              aria-label={`Video preview: ${activeEntry.name}`}
             />
           ) : preview?.previewType === "text" && preview.textContent ? (
             <pre

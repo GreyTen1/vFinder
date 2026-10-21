@@ -1961,6 +1961,15 @@ pub async fn set_default_app(
 }
 
 #[tauri::command]
+pub fn get_video_preview_url(path: String) -> Result<String, String> {
+    let file_path = Path::new(&path);
+    if !file_path.is_file() {
+        return Err("Video file no longer exists".to_string());
+    }
+    crate::download_server::register_video_preview(file_path)
+}
+
+#[tauri::command]
 pub async fn read_file_preview(
     path: String,
     max_bytes: Option<usize>,
@@ -1998,6 +2007,10 @@ pub async fn read_file_preview(
             ext,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "jfif"
         );
+        let is_video = matches!(
+            ext,
+            "mp4" | "m4v" | "mkv" | "mov" | "webm" | "avi" | "mpeg" | "mpg" | "3gp"
+        ) || entry.mime_type.starts_with("video/");
 
         if is_image && entry.size <= 15 * 1024 * 1024 {
             let bytes = fs::read(p).map_err(|e| e.to_string())?;
@@ -2021,6 +2034,25 @@ pub async fn read_file_preview(
                 preview_type: "image".to_string(),
                 text_content: None,
                 data_url: Some(format!("data:{};base64,{}", mime, encoded)),
+                truncated: false,
+            });
+        }
+
+        if is_video {
+            return Ok(FilePreview {
+                path: entry.path,
+                name: entry.name,
+                kind: entry.kind,
+                mime_type: entry.mime_type,
+                size: entry.size,
+                modified: entry.modified,
+                created: entry.created,
+                permissions: entry.permissions,
+                is_dir: false,
+                child_count: None,
+                preview_type: "video".to_string(),
+                text_content: None,
+                data_url: None,
                 truncated: false,
             });
         }

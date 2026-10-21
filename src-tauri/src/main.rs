@@ -384,6 +384,7 @@ fn main() {
             commands::open_item_with,
             commands::set_default_app,
             commands::read_file_preview,
+            commands::get_video_preview_url,
             commands::search_directory,
             commands::toggle_item_tag,
             commands::get_files_by_tag,

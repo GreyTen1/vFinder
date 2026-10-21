@@ -70,6 +70,12 @@ Arch and derivatives ☑️ tested
       webkit2gtk-4.1 \
       gtk3 \
       libsoup3 \
+      gstreamer \
+      gst-plugins-base \
+      gst-plugins-good \
+      gst-plugins-bad \
+      gst-plugins-ugly \
+      gst-libav \
       udisks2 \
       util-linux \
       curl \

@@ -37,7 +37,7 @@ import {
   formatMacDate,
 } from "../types";
 import { FileIcon } from "./FileIcon";
-import { apiReadFilePreview, apiGetAvailableFormatTypes } from "../api";
+import { apiReadFilePreview, apiGetVideoPreviewUrl, apiGetAvailableFormatTypes } from "../api";
 import { useToolbarOutsideDismiss } from "./useToolbarOutsideDismiss";
 
 /* ============================================================================
@@ -58,17 +58,49 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
 }) => {
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [loading, setLoading] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [videoErrorCopied, setVideoErrorCopied] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   useToolbarOutsideDismiss(dialogRef, Boolean(entry), onClose);
 
   useEffect(() => {
     if (!entry) return;
+    let cancelled = false;
     setLoading(true);
+    setPreview(null);
+    setVideoError(null);
+    setVideoErrorCopied(false);
+    setVideoUrl(null);
     apiReadFilePreview(entry.path, 65536)
-      .then((res) => setPreview(res))
-      .catch(() => setPreview(null))
-      .finally(() => setLoading(false));
+      .then((res) => {
+        if (!cancelled) setPreview(res);
+      })
+      .catch(() => {
+        if (!cancelled) setPreview(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [entry?.path]);
+
+  useEffect(() => {
+    if (!entry || preview?.previewType !== "video") return;
+    let cancelled = false;
+    apiGetVideoPreviewUrl(entry.path)
+      .then((url) => {
+        if (!cancelled) setVideoUrl(url);
+      })
+      .catch((error) => {
+        if (!cancelled) setVideoError(`Could not prepare local video stream: ${String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [entry?.path, preview?.previewType]);
 
   if (!entry) return null;
 
@@ -135,6 +167,82 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
               alt={entry.name}
               className="max-h-full max-w-full object-contain rounded-lg shadow-lg"
             />
+          ) : preview?.previewType === "video" ? (
+            <div className="flex max-h-full max-w-full flex-col items-center gap-2">
+              {!videoUrl && videoError === null && (
+                <div className="text-xs opacity-50">Preparing video preview...</div>
+              )}
+              {videoUrl && (
+              <video
+                key={entry.path}
+                controls
+                playsInline
+                preload="metadata"
+                onError={(event) => {
+                  const video = event.currentTarget;
+                  const error = video.error;
+                  const code = error?.code ?? 0;
+                  const codeName = [
+                    "",
+                    "aborted",
+                    "network error",
+                    "decode error",
+                    "unsupported source or codec",
+                  ][code] ?? "unknown media error";
+                  const source = video.currentSrc || "not selected";
+                  const safeSource = source.replace(/([?&]token=)[^&]*/, "$1[redacted]");
+                  setVideoError(
+                    `Error ${code} (${codeName})${error?.message ? `: ${error.message}` : ""}. ` +
+                      `MIME: ${preview.mimeType || "unknown"}; ` +
+                      `canPlayType: ${video.canPlayType(preview.mimeType || "") || "no"}; ` +
+                      `networkState: ${video.networkState}; readyState: ${video.readyState}; ` +
+                      `source: ${safeSource}`,
+                  );
+                }}
+                className="max-h-full max-w-full rounded-lg bg-black shadow-lg"
+                aria-label={`Video preview: ${entry.name}`}
+              >
+                <source
+                  src={videoUrl}
+                  type={preview.mimeType || undefined}
+                />
+              </video>
+              )}
+              {videoError !== null && (
+                <div className="flex max-w-lg items-start gap-2 text-xs text-amber-400">
+                  <p className="min-w-0 select-text text-center">
+                    WebKitGTK could not play this video: {videoError}. Open it in an external player if needed.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const diagnostic = `Video preview error for ${entry.name}\n${videoError}`;
+                      try {
+                        await navigator.clipboard.writeText(diagnostic);
+                      } catch {
+                        const textarea = document.createElement("textarea");
+                        textarea.value = diagnostic;
+                        textarea.style.position = "fixed";
+                        textarea.style.opacity = "0";
+                        document.body.appendChild(textarea);
+                        textarea.select();
+                        const copied = document.execCommand("copy");
+                        textarea.remove();
+                        if (!copied) return;
+                      }
+                      setVideoErrorCopied(true);
+                      window.setTimeout(() => setVideoErrorCopied(false), 1800);
+                    }}
+                    className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-amber-200 hover:bg-white/10"
+                    title="Copy video diagnostic"
+                    aria-label="Copy video diagnostic"
+                  >
+                    {videoErrorCopied ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    {videoErrorCopied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              )}
+            </div>
           ) : preview?.previewType === "text" && preview.textContent !== undefined ? (
             <div
               className={`w-full h-full rounded-xl border overflow-auto p-4 font-mono text-xs leading-relaxed ${

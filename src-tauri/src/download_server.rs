@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -9,6 +9,37 @@ use tauri::{AppHandle, Emitter, Manager};
 static PENDING_DOWNLOADS_BY_WINDOW: OnceLock<Mutex<HashMap<String, Vec<InterceptedDownloadPayload>>>> = OnceLock::new();
 static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
 static INITIAL_DOWNLOAD_CLAIMED: AtomicBool = AtomicBool::new(false);
+static VIDEO_PREVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
+static VIDEO_PREVIEWS: OnceLock<Mutex<HashMap<String, (PathBuf, std::time::Instant)>>> = OnceLock::new();
+
+pub fn register_video_preview(path: &Path) -> Result<String, String> {
+    let canonical_path = path.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_path.is_file() {
+        return Err("Video file does not exist".to_string());
+    }
+
+    let mut random = [0u8; 24];
+    let token = if std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut random))
+        .is_ok()
+    {
+        random.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    } else {
+        format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default(),
+            VIDEO_PREVIEW_COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    };
+    let previews = VIDEO_PREVIEWS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut previews = previews.lock().map_err(|_| "Preview registry unavailable".to_string())?;
+    previews.retain(|_, (_, created)| created.elapsed() < Duration::from_secs(2 * 60 * 60));
+    previews.insert(token.clone(), (canonical_path, std::time::Instant::now()));
+    Ok(format!("http://127.0.0.1:45456/preview/video?token={token}"))
+}
 
 pub fn add_pending_download_for_window(window_label: &str, payload: InterceptedDownloadPayload) {
     if let Ok(mut map) = PENDING_DOWNLOADS_BY_WINDOW.get_or_init(|| Mutex::new(HashMap::new())).lock() {
@@ -238,6 +269,7 @@ fn handle_client(stream: &mut TcpStream, app: &AppHandle) {
     let path = parts[1];
 
     let mut content_length: usize = 0;
+    let mut range_header: Option<String> = None;
     loop {
         let mut header_line = String::new();
         if reader.read_line(&mut header_line).is_err() || header_line == "\r\n" || header_line == "\n" {
@@ -249,6 +281,14 @@ fn handle_client(stream: &mut TcpStream, app: &AppHandle) {
                 content_length = val_str.trim().parse::<usize>().unwrap_or(0);
             }
         }
+        if lower.starts_with("range:") {
+            range_header = Some(header_line[6..].trim().to_string());
+        }
+    }
+
+    if (method == "GET" || method == "HEAD") && path.starts_with("/preview/video?") {
+        serve_video_preview(stream, path, method == "HEAD", range_header.as_deref());
+        return;
     }
 
     // CORS preflight OPTIONS request
@@ -412,4 +452,53 @@ Connection: close\r\n\
         resp_body
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+fn serve_video_preview(stream: &mut TcpStream, request_path: &str, head_only: bool, range: Option<&str>) {
+    let token = request_path
+        .split_once("token=")
+        .map(|(_, value)| value.split('&').next().unwrap_or_default())
+        .unwrap_or_default();
+    let path = VIDEO_PREVIEWS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|mut previews| {
+            previews.retain(|_, (_, created)| created.elapsed() < Duration::from_secs(2 * 60 * 60));
+            previews.get(token).map(|(path, _)| path.clone())
+        });
+    let Some(path) = path else {
+        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    };
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    };
+    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else { return };
+    let (start, end, partial) = if let Some(value) = range.and_then(|value| value.strip_prefix("bytes=")) {
+        if let Some((start, end)) = value.split_once('-') {
+            let start = start.parse::<u64>().unwrap_or(u64::MAX);
+            let end = if end.is_empty() { file_len.saturating_sub(1) } else { end.parse::<u64>().unwrap_or(u64::MAX) };
+            if start < file_len && end >= start {
+                (start, end.min(file_len.saturating_sub(1)), true)
+            } else {
+                let response = format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{file_len}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(response.as_bytes());
+                return;
+            }
+        } else { (0, file_len.saturating_sub(1), false) }
+    } else { (0, file_len.saturating_sub(1), false) };
+    let length = if file_len == 0 { 0 } else { end.saturating_sub(start).saturating_add(1) };
+    if file.seek(SeekFrom::Start(start)).is_err() { return; }
+    let mime = mime_guess::from_path(&path).first_or_octet_stream();
+    let status = if partial { "206 Partial Content" } else { "200 OK" };
+    let mut headers = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nAccept-Ranges: bytes\r\nContent-Length: {length}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n"
+    );
+    if partial { headers.push_str(&format!("Content-Range: bytes {start}-{end}/{file_len}\r\n")); }
+    headers.push_str("\r\n");
+    if stream.write_all(headers.as_bytes()).is_err() || head_only { return; }
+    let mut limited = file.take(length);
+    let _ = std::io::copy(&mut limited, stream);
 }

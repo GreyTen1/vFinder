@@ -28,6 +28,17 @@ const IMAGE_EXTENSIONS = new Set([
   "avif",
   "jfif",
 ]);
+const VIDEO_EXTENSIONS = new Set([
+  "mp4",
+  "m4v",
+  "mkv",
+  "mov",
+  "webm",
+  "avi",
+  "mpeg",
+  "mpg",
+  "3gp",
+]);
 
 // Module-level cache of resolved image thumbnail URLs keyed by `${path}::${modified}::${targetSize}`
 const THUMBNAIL_URL_CACHE = new Map<string, string>();
@@ -76,11 +87,85 @@ function enqueueTask(task: () => Promise<void>) {
   scheduleQueueDrain();
 }
 
+function createVideoThumbnail(
+  path: string,
+  targetSize: number
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    let settled = false;
+    const timeoutId = window.setTimeout(finish, 15000);
+
+    function finish(result: string | null = null) {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      video.onloadedmetadata = null;
+      video.onloadeddata = null;
+      video.onseeked = null;
+      video.onerror = null;
+      video.removeAttribute("src");
+      video.load();
+      resolve(result);
+    }
+
+    const captureFrame = () => {
+      if (!video.videoWidth || !video.videoHeight) {
+        finish();
+        return;
+      }
+      try {
+        const scale = Math.min(1, targetSize / Math.max(video.videoWidth, video.videoHeight));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+        canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+        const context = canvas.getContext("2d");
+        if (!context) {
+          finish();
+          return;
+        }
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        finish(canvas.toDataURL("image/jpeg", 0.78));
+      } catch {
+        finish();
+      }
+    };
+
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.crossOrigin = "anonymous";
+    video.onloadedmetadata = () => {
+      const seekTo = Number.isFinite(video.duration)
+        ? Math.min(1, Math.max(0, video.duration * 0.1))
+        : 0;
+      if (seekTo > 0.05) {
+        video.onseeked = captureFrame;
+        try {
+          video.currentTime = seekTo;
+        } catch {
+          video.onloadeddata = captureFrame;
+        }
+      } else {
+        video.onloadeddata = captureFrame;
+      }
+    };
+    video.onerror = () => finish();
+    try {
+      video.src = convertFileSrc(path);
+      video.load();
+    } catch {
+      finish();
+    }
+  });
+}
+
 function fetchThumbnail(
   cacheKey: string,
   path: string,
   targetSize: number,
   isSvg: boolean,
+  isVideo: boolean,
   fileSize?: number
 ): Promise<string | null> {
   const existing = INFLIGHT_REQUESTS.get(cacheKey);
@@ -100,7 +185,17 @@ function fetchThumbnail(
   const promise = new Promise<string | null>((resolve) => {
     enqueueTask(async () => {
       try {
-        const thumbPath = await apiGetImageThumbnail(path, targetSize);
+        const videoThumbnail = isVideo
+          ? await createVideoThumbnail(path, targetSize)
+          : null;
+        if (videoThumbnail) {
+          THUMBNAIL_URL_CACHE.set(cacheKey, videoThumbnail);
+          resolve(videoThumbnail);
+          return;
+        }
+        const thumbPath = isVideo
+          ? null
+          : await apiGetImageThumbnail(path, targetSize);
         if (thumbPath) {
           try {
             const assetUrl = convertFileSrc(thumbPath);
@@ -112,7 +207,7 @@ function fetchThumbnail(
           }
         }
         // Fallback: read directly via read_file_preview
-        if (fileSize && fileSize <= 5 * 1024 * 1024) {
+        if (!isVideo && fileSize && fileSize <= 5 * 1024 * 1024) {
           try {
             const preview = await apiReadFilePreview(path, 5 * 1024 * 1024);
             if (preview.dataUrl) {
@@ -127,7 +222,7 @@ function fetchThumbnail(
         resolve(null);
       } catch {
         // Fallback: only if original image is reasonably small (<= 5MB)
-        if (fileSize && fileSize <= 5 * 1024 * 1024) {
+        if (!isVideo && fileSize && fileSize <= 5 * 1024 * 1024) {
           try {
             const preview = await apiReadFilePreview(path, 5 * 1024 * 1024);
             if (preview.dataUrl) {
@@ -279,7 +374,8 @@ const ImageFileIcon: React.FC<{
   ext: string;
   size: number;
   className: string;
-}> = React.memo(({ entry, ext, size, className }) => {
+  isVideo?: boolean;
+}> = React.memo(({ entry, ext, size, className, isVideo = false }) => {
   const isSvg = ext === "svg";
   const targetSize = size <= 32 ? 64 : size <= 80 ? 128 : 256;
   const entryPath = entry.path || "";
@@ -323,7 +419,7 @@ const ImageFileIcon: React.FC<{
 
     const startFetch = () => {
       if (cancelled) return;
-      fetchThumbnail(cacheKey, entryPath, targetSize, isSvg, entry.size).then(
+      fetchThumbnail(cacheKey, entryPath, targetSize, isSvg, isVideo, entry.size).then(
         (url) => {
           if (cancelled) return;
           if (url) {
@@ -347,7 +443,7 @@ const ImageFileIcon: React.FC<{
       cancelled = true;
       if (timerId !== null) clearTimeout(timerId);
     };
-  }, [isVisible, effectiveSrc, imgFailed, entryPath, cacheKey, targetSize, isSvg, entry.size]);
+  }, [isVisible, effectiveSrc, imgFailed, entryPath, cacheKey, targetSize, isSvg, isVideo, entry.size]);
 
   const handleImgError = async () => {
     if (entryPath && (!effectiveSrc || !effectiveSrc.startsWith("data:"))) {
@@ -544,14 +640,19 @@ export const FileIcon: React.FC<FileIconProps> = React.memo(
       Boolean(entry.path) &&
       (IMAGE_EXTENSIONS.has(ext) ||
         (entry.mimeType && entry.mimeType.startsWith("image/")));
+    const isVideoFile =
+      Boolean(entry.path) &&
+      (VIDEO_EXTENSIONS.has(ext) ||
+        Boolean(entry.mimeType && entry.mimeType.startsWith("video/")));
 
-    if (isImageFile) {
+    if (isImageFile || isVideoFile) {
       return (
         <ImageFileIcon
           entry={entry}
           ext={ext}
           size={size}
           className={className}
+          isVideo={isVideoFile}
         />
       );
     }
