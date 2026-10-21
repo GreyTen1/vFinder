@@ -80,6 +80,24 @@ Arch and derivatives ☑️ tested
       btrfs-progs \
       ntfs-3g
 
+Fedora (not yet tested)
+
+Runtime dependencies:
+
+    sudo dnf install -y \
+      webkit2gtk4.1 \
+      gtk3 \
+      libsoup3 \
+      udisks2 \
+      util-linux \
+      curl \
+      python3 \
+      dosfstools \
+      exfatprogs \
+      e2fsprogs \
+      btrfs-progs \
+      ntfs-3g
+
 
 ## Build from source ##
 
@@ -96,3 +114,27 @@ These are the dependencies youll need if you want to compile it by yourself: (ub
       npm \
       cargo \
       rustc
+
+For Fedora, install the native build dependencies and JavaScript tools with:
+
+    sudo dnf install -y \
+      webkit2gtk4.1-devel \
+      gtk3-devel \
+      libsoup3-devel \
+      openssl-devel \
+      libappindicator-gtk3-devel \
+      librsvg2-devel \
+      libxdo-devel \
+      pkgconf-pkg-config \
+      gcc \
+      gcc-c++ \
+      make \
+      curl \
+      wget \
+      file \
+      nodejs \
+      npm
+
+    sudo dnf group install -y c-development
+
+Install Rust using rustup, then build vFinder with `npm install` and `npm run tauri build`.
