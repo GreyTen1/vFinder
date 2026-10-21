@@ -16,7 +16,7 @@ It looks cool! currently, there are many other incredible good options around he
 Altough It's way far from perfect right now, I believe it can be a usable daily driver for those who enjoy this aesthetic 
 
 ### IMPORTANT!!! ###
-If you want to use apple's fonts, you have to obtain them from their official website, however, you can still use its fallback fonts that are commonly included in Linux distros
+If you want to use apple's fonts, you have to obtain them from their official website, however, fallback fonts that are commonly bundled in Linux distros are included
 
 ## Features? ##
 
