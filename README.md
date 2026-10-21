@@ -6,12 +6,14 @@ macOS' file exlorer, but for linux
 
 ## What is this? ##
 
-A file explorer written in TypeScript and Rust
+A file explorer written in TypeScript, TailWind, and Rust
+
+![showcase_png](https://github.com/GreyTen1/vFinder/blob/main/md_assets/showcase.png)
 
 ## Why would I use it? ##
 
 It looks cool! currently, there are many other incredible good options around here, but none of them looks like macos' file explorer (finder)
-altough It's way far from perfect right now, I believe it can be a usable daily driver for those who enjoy this aesthetic 
+Altough It's way far from perfect right now, I believe it can be a usable daily driver for those who enjoy this aesthetic 
 
 ## Compatible distros ##
 
