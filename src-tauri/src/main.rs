@@ -409,7 +409,6 @@ fn main() {
             commands::copy_items,
             commands::move_items,
             commands::duplicate_item,
-            commands::is_zip_available,
             commands::compress_items,
             commands::read_archive_contents,
             commands::extract_archive,

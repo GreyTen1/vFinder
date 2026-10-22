@@ -813,7 +813,6 @@ interface ContextMenuProps {
   onRename: (entry: FileEntry) => void;
   onDuplicate: (entry?: FileEntry) => void;
   onCompress?: (entry?: FileEntry) => void;
-  zipAvailable?: boolean;
   onViewArchive?: (entry: FileEntry) => void;
   onExtractArchive?: (entry: FileEntry) => void;
   onCopy: (entry?: FileEntry) => void;
@@ -851,7 +850,6 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onRename,
   onDuplicate,
   onCompress,
-  zipAvailable = false,
   onViewArchive,
   onExtractArchive,
   onCopy,
@@ -1201,7 +1199,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               <span>Duplicate{countSuffix}</span>
               <span className="ml-auto opacity-60 text-[10px]">Ctrl+D</span>
             </button>
-            {zipAvailable && onCompress && (
+            {onCompress && (
               <button
                 onClick={() => {
                   onCompress(isMultiSelected ? undefined : entry);

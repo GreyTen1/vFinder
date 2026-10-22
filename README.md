@@ -104,15 +104,9 @@ Runtime dependencies:
       btrfs-progs \
       ntfs-3g
 
-### Optional dependency: ZIP compression
+### Archive support
 
-The **Compress as ZIP** context-menu action is shown only when the `zip` command is installed. Install it with your distribution's package manager:
-
-- Ubuntu / Debian: `sudo apt install zip`
-- Arch: `sudo pacman -S zip`
-- Fedora: `sudo dnf install zip`
-
-ZIP support is optional; vFinder works without it and hides the compression action.
+ZIP creation, viewing, and extraction are built into vFinder. Reading and extracting TAR archives is also supported for `.tar`, `.tar.gz` / `.tgz`, `.tar.bz2` / `.tbz` / `.tbz2`, `.tar.xz` / `.txz`, `.tar.zst` / `.tzst`, and `.tar.lzma` files. No separate `zip` command or archive utility is required at runtime.
 
 
 ## Build from source ##

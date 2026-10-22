@@ -32,7 +32,6 @@ import {
   apiGetFilesByTag,
   apiGetSidebarData,
   apiGetStartupDirectory,
-  apiIsZipAvailable,
   apiExtractArchive,
   apiMountPartition,
   apiMoveItems,
@@ -448,7 +447,6 @@ export const App: React.FC = () => {
   const [formatVolume, setFormatVolume] = useState<VolumeInfo | null>(null);
   const [firstAidVolume, setFirstAidVolume] = useState<VolumeInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [zipAvailable, setZipAvailable] = useState(false);
   const [activeOperations, setActiveOperations] = useState<Array<{ id: number; label: string }>>([]);
   const [openingArchive, setOpeningArchive] = useState<string | null>(null);
   const operationIdRef = useRef(0);
@@ -475,20 +473,6 @@ export const App: React.FC = () => {
       window.clearTimeout(revealTimer);
       setActiveOperations((current) => current.filter((item) => item.id !== id));
     }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    apiIsZipAvailable()
-      .then((available) => {
-        if (!cancelled) setZipAvailable(available);
-      })
-      .catch(() => {
-        if (!cancelled) setZipAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   // Download Manager state
@@ -3902,7 +3886,6 @@ export const App: React.FC = () => {
         onRename={startRename}
         onDuplicate={handleDuplicate}
         onCompress={handleCompress}
-        zipAvailable={zipAvailable}
         onViewArchive={(entry) => void handleBrowseArchive(entry.path)}
         onExtractArchive={(entry) => void handleExtractArchive(entry.path)}
         onCopy={handleCopy}

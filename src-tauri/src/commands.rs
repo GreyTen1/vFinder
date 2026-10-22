@@ -6,7 +6,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1882,13 +1882,47 @@ pub async fn duplicate_item(path: String) -> Result<FileEntry, String> {
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn is_zip_available() -> bool {
-    Command::new("zip")
-        .arg("-v")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+fn append_path_to_zip<W: Write + Seek>(
+    writer: &mut zip::ZipWriter<W>,
+    source: &Path,
+    base: &Path,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("Cannot add symbolic links to ZIP archives: {}", source.display()));
+    }
+
+    let relative = source
+        .strip_prefix(base)
+        .map_err(|error| format!("Could not create archive path: {error}"))?;
+    let archive_name = relative.to_string_lossy().replace('\\', "/");
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(metadata.permissions().mode() & 0o777);
+
+    if metadata.is_dir() {
+        writer
+            .add_directory(format!("{archive_name}/"), options)
+            .map_err(|error| format!("Could not add folder to ZIP: {error}"))?;
+        for child in fs::read_dir(source)
+            .map_err(|error| format!("Could not read folder {}: {error}", source.display()))?
+        {
+            let child = child.map_err(|error| format!("Could not read folder entry: {error}"))?;
+            append_path_to_zip(writer, &child.path(), base)?;
+        }
+    } else if metadata.is_file() {
+        writer
+            .start_file(&archive_name, options)
+            .map_err(|error| format!("Could not add file to ZIP: {error}"))?;
+        let mut input = fs::File::open(source)
+            .map_err(|error| format!("Could not open {}: {error}", source.display()))?;
+        std::io::copy(&mut input, writer)
+            .map_err(|error| format!("Could not compress {}: {error}", source.display()))?;
+    } else {
+        return Err(format!("Cannot add special files to ZIP archives: {}", source.display()));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1923,30 +1957,23 @@ pub async fn compress_items(paths: Vec<String>) -> Result<String, String> {
             "Archive.zip".to_string()
         };
         let archive_path = unique_destination_path(&first_parent, &archive_name);
-        let archive_file = archive_path
-            .file_name()
-            .ok_or_else(|| "Invalid archive name".to_string())?;
-        let mut command = Command::new("zip");
-        command.arg("-r").arg(archive_file).current_dir(&first_parent);
-        for item in &items {
-            let name = item
-                .file_name()
-                .ok_or_else(|| format!("Invalid item path: {}", item.display()))?
-                .to_string_lossy();
-            // Prefixing with ./ prevents names beginning with '-' being parsed as options.
-            command.arg(format!("./{name}"));
-        }
-        let output = command.output().map_err(|error| {
-            format!("Could not start zip: {error}")
-        })?;
-        if !output.status.success() {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&archive_path)
+            .map_err(|error| format!("Could not create ZIP archive: {error}"))?;
+        let mut writer = zip::ZipWriter::new(file);
+        let write_result = items.iter().try_for_each(|item| {
+            append_path_to_zip(&mut writer, item, &first_parent)
+        });
+        if let Err(error) = write_result {
+            drop(writer);
             let _ = fs::remove_file(&archive_path);
-            let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if details.is_empty() {
-                format!("zip exited with status {}", output.status)
-            } else {
-                details
-            });
+            return Err(error);
+        }
+        if let Err(error) = writer.finish() {
+            let _ = fs::remove_file(&archive_path);
+            return Err(format!("Could not finish ZIP archive: {error}"));
         }
 
         bump_cache_version();
