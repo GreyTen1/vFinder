@@ -38,8 +38,9 @@ Dependencies:
       libsoup-3.0-0 \
       udisks2 \
       util-linux \
+      sudo \
+      which \
       curl \
-      python3 \
       dosfstools \
       exfatprogs \
       e2fsprogs \
@@ -56,8 +57,9 @@ Runtime dependencies:
       libsoup-3.0-0 \
       udisks2 \
       util-linux \
+      sudo \
+      which \
       curl \
-      python3 \
       dosfstools \
       exfatprogs \
       e2fsprogs \
@@ -78,8 +80,9 @@ Arch and derivatives ☑️ tested
       gst-libav \
       udisks2 \
       util-linux \
+      sudo \
+      which \
       curl \
-      python \
       dosfstools \
       exfatprogs \
       e2fsprogs \
@@ -96,8 +99,9 @@ Runtime dependencies:
       libsoup3 \
       udisks2 \
       util-linux \
+      sudo \
+      which \
       curl \
-      python3 \
       dosfstools \
       exfatprogs \
       e2fsprogs \
@@ -119,11 +123,19 @@ These are the dependencies youll need if you want to compile it by yourself: (ub
       libwebkit2gtk-4.1-dev \
       libgtk-3-dev \
       libsoup-3.0-dev \
+      libxdo-dev \
+      libayatana-appindicator3-dev \
+      librsvg2-dev \
       libssl-dev \
+      curl \
+      wget \
+      file \
       nodejs \
-      npm \
-      cargo \
-      rustc
+      npm
 
 
-Install Rust using rustup, then build vFinder with `npm install` and `npm run tauri build`.
+Install Rust using rustup and Node.js 18.x, 20.x, or 22+, then build vFinder with `npm install` and `npm run tauri build`. The Linux build packages above follow [Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+### Optional browser download integration
+
+The native messaging host used by the optional browser download integration requires Python 3: install `python3` on Ubuntu/Debian/Fedora or `python` on Arch. `curl` is listed as a runtime dependency because vFinder also uses it for URL downloads.
