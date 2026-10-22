@@ -1,2 +1,9 @@
 src-tauri/target/
 vfinder-release/
+/node_modules/
+/dist/
+/src-tauri/gen/schemas/
+/__pycache__/
+*.py[cod]
+.DS_Store
+*.log
