@@ -1880,6 +1880,80 @@ pub async fn duplicate_item(path: String) -> Result<FileEntry, String> {
 }
 
 #[tauri::command]
+pub fn is_zip_available() -> bool {
+    Command::new("zip")
+        .arg("-v")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn compress_items(paths: Vec<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if paths.is_empty() {
+            return Err("Select at least one file or folder to compress".to_string());
+        }
+
+        let items = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let first_parent = items[0]
+            .parent()
+            .ok_or_else(|| "Cannot compress a filesystem root".to_string())?
+            .to_path_buf();
+        for item in &items {
+            if !item.exists() {
+                return Err(format!("Item no longer exists: {}", item.display()));
+            }
+            if item.parent() != Some(first_parent.as_path()) {
+                return Err("Selected items must be in the same folder to compress them together".to_string());
+            }
+        }
+
+        let archive_name = if items.len() == 1 {
+            let name = items[0]
+                .file_name()
+                .ok_or_else(|| "Invalid item name".to_string())?
+                .to_string_lossy()
+                .to_string();
+            format!("{}.zip", Path::new(&name).file_stem().unwrap_or_default().to_string_lossy())
+        } else {
+            "Archive.zip".to_string()
+        };
+        let archive_path = unique_destination_path(&first_parent, &archive_name);
+        let archive_file = archive_path
+            .file_name()
+            .ok_or_else(|| "Invalid archive name".to_string())?;
+        let mut command = Command::new("zip");
+        command.arg("-r").arg(archive_file).current_dir(&first_parent);
+        for item in &items {
+            let name = item
+                .file_name()
+                .ok_or_else(|| format!("Invalid item path: {}", item.display()))?
+                .to_string_lossy();
+            // Prefixing with ./ prevents names beginning with '-' being parsed as options.
+            command.arg(format!("./{name}"));
+        }
+        let output = command.output().map_err(|error| {
+            format!("Could not start zip: {error}")
+        })?;
+        if !output.status.success() {
+            let _ = fs::remove_file(&archive_path);
+            let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if details.is_empty() {
+                format!("zip exited with status {}", output.status)
+            } else {
+                details
+            });
+        }
+
+        bump_cache_version();
+        Ok(archive_path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn trash_items(paths: Vec<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         for p in paths {

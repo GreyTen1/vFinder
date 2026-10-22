@@ -12,6 +12,7 @@ import {
   Edit3,
   Eye,
   Files,
+  Archive,
   Star,
   ChevronRight,
   Folder,
@@ -667,6 +668,8 @@ interface ContextMenuProps {
   onGetInfo: (entry?: FileEntry) => void;
   onRename: (entry: FileEntry) => void;
   onDuplicate: (entry?: FileEntry) => void;
+  onCompress?: (entry?: FileEntry) => void;
+  zipAvailable?: boolean;
   onCopy: (entry?: FileEntry) => void;
   onCut: (entry?: FileEntry) => void;
   onPaste: () => void;
@@ -701,6 +704,8 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onGetInfo,
   onRename,
   onDuplicate,
+  onCompress,
+  zipAvailable = false,
   onCopy,
   onCut,
   onPaste,
@@ -1017,6 +1022,18 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               <span>Duplicate{countSuffix}</span>
               <span className="ml-auto opacity-60 text-[10px]">Ctrl+D</span>
             </button>
+            {zipAvailable && onCompress && (
+              <button
+                onClick={() => {
+                  onCompress(isMultiSelected ? undefined : entry);
+                  onClose();
+                }}
+                className={itemCls}
+              >
+                <Archive className="w-3.5 h-3.5" />
+                <span>Compress as ZIP{countSuffix}</span>
+              </button>
+            )}
             <div className="my-1 border-t border-current/10" />
             <button
               onClick={() => {

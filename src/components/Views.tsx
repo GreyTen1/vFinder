@@ -399,6 +399,7 @@ interface IconViewItemProps {
   darkMode: boolean;
   iconSize: number;
   renameValue: string;
+  virtualStyle?: React.CSSProperties;
   onOpenEntry: (entry: FileEntry) => void;
   onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   onStartItemDrag: (e: React.MouseEvent, entry: FileEntry) => void;
@@ -418,6 +419,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
     darkMode,
     iconSize,
     renameValue,
+    virtualStyle,
     onOpenEntry,
     onContextMenu,
     onStartItemDrag,
@@ -442,6 +444,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
         }}
         style={{
           maxWidth: maxW,
+          ...virtualStyle,
         }}
         className={`group flex flex-col items-center p-1.5 rounded-xl cursor-default w-full ${
           entry.isHidden ? "opacity-55" : ""
@@ -553,6 +556,8 @@ export const IconView: React.FC<CommonViewProps> = ({
   iconSize,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [gridViewport, setGridViewport] = useState({ width: 0, height: 0, top: 0 });
+  const gridScrollFrameRef = useRef<number | null>(null);
   const cellWidth = Math.max(96, iconSize + 44);
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
@@ -585,9 +590,75 @@ export const IconView: React.FC<CommonViewProps> = ({
     onClickEntryFallback: handleClickEntryByPath,
   });
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const updateSize = () => {
+      setGridViewport((current) => {
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+        const top = container.scrollTop;
+        return current.width === width && current.height === height && current.top === top
+          ? current
+          : { width, height, top };
+      });
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleGridScroll = useCallback(() => {
+    if (gridScrollFrameRef.current !== null) return;
+    gridScrollFrameRef.current = requestAnimationFrame(() => {
+      gridScrollFrameRef.current = null;
+      const container = containerRef.current;
+      if (!container) return;
+      setGridViewport((current) =>
+        current.top === container.scrollTop
+          ? current
+          : { ...current, top: container.scrollTop }
+      );
+    });
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (gridScrollFrameRef.current !== null) {
+        cancelAnimationFrame(gridScrollFrameRef.current);
+      }
+    },
+    []
+  );
+
+  const isLargeGrid = entries.length > 300;
+  const contentWidth = Math.max(0, gridViewport.width - 40);
+  const columnCount = isLargeGrid
+    ? Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)))
+    : 1;
+  const itemHeight = iconSize + 53;
+  const rowPitch = itemHeight + 20;
+  const rowCount = Math.ceil(entries.length / columnCount);
+  const firstVisibleRow = isLargeGrid
+    ? Math.max(0, Math.floor((gridViewport.top - 20) / rowPitch) - 3)
+    : 0;
+  const lastVisibleRow = isLargeGrid
+    ? Math.min(
+        rowCount,
+        Math.ceil((gridViewport.top + gridViewport.height - 20) / rowPitch) + 4
+      )
+    : rowCount;
+  const firstVisibleIndex = firstVisibleRow * columnCount;
+  const lastVisibleIndex = Math.min(entries.length, lastVisibleRow * columnCount);
+  const renderedEntries = isLargeGrid
+    ? entries.slice(firstVisibleIndex, lastVisibleIndex)
+    : entries;
+
   return (
     <div
       ref={containerRef}
+      onScroll={handleGridScroll}
       data-tab-scroll-view="icons"
       onMouseDown={handleContainerMouseDown}
       onDragStart={(e) => e.preventDefault()}
@@ -602,29 +673,43 @@ export const IconView: React.FC<CommonViewProps> = ({
         <div
           className="grid gap-y-5 gap-x-3 justify-items-center"
           style={{
-            gridTemplateColumns: `repeat(auto-fill, minmax(${cellWidth}px, 1fr))`,
+            gridTemplateColumns: isLargeGrid
+              ? `repeat(${columnCount}, minmax(${cellWidth}px, 1fr))`
+              : `repeat(auto-fill, minmax(${cellWidth}px, 1fr))`,
+            ...(isLargeGrid ? { gridAutoRows: `${itemHeight}px` } : {}),
           }}
         >
-          {entries.map((entry) => (
-            <IconViewItem
-              key={entry.path}
-              entry={entry}
-              isSelected={selectedSet.has(entry.path)}
-              isRenaming={renamingPath === entry.path}
-              isDropTarget={entry.isDir && dropTargetPath === entry.path}
-              isBeingDragged={draggedSet.has(entry.path)}
-              darkMode={darkMode}
-              iconSize={iconSize}
-              renameValue={renameValue}
-              onOpenEntry={onOpenEntry}
-              onContextMenu={onContextMenu}
-              onStartItemDrag={handleStartDragBound}
-              onRenameChange={onRenameChange}
-              onStartRename={onStartRename}
-              onRenameSubmit={onRenameSubmit}
-              onRenameCancel={onRenameCancel}
-            />
-          ))}
+          {renderedEntries.map((entry, visibleIndex) => {
+            const index = firstVisibleIndex + visibleIndex;
+            return (
+              <IconViewItem
+                key={entry.path}
+                entry={entry}
+                isSelected={selectedSet.has(entry.path)}
+                isRenaming={renamingPath === entry.path}
+                isDropTarget={entry.isDir && dropTargetPath === entry.path}
+                isBeingDragged={draggedSet.has(entry.path)}
+                darkMode={darkMode}
+                iconSize={iconSize}
+                renameValue={renameValue}
+                virtualStyle={
+                  isLargeGrid
+                    ? {
+                        gridColumn: (index % columnCount) + 1,
+                        gridRow: Math.floor(index / columnCount) + 1,
+                      }
+                    : undefined
+                }
+                onOpenEntry={onOpenEntry}
+                onContextMenu={onContextMenu}
+                onStartItemDrag={handleStartDragBound}
+                onRenameChange={onRenameChange}
+                onStartRename={onStartRename}
+                onRenameSubmit={onRenameSubmit}
+                onRenameCancel={onRenameCancel}
+              />
+            );
+          })}
         </div>
       )}
 

@@ -132,6 +132,14 @@ export async function apiDuplicateItem(path: string): Promise<FileEntry> {
   return invoke<FileEntry>("duplicate_item", { path });
 }
 
+export async function apiIsZipAvailable(): Promise<boolean> {
+  return invoke<boolean>("is_zip_available");
+}
+
+export async function apiCompressItems(paths: string[]): Promise<string> {
+  return invoke<string>("compress_items", { paths });
+}
+
 export async function apiTrashItems(paths: string[]): Promise<void> {
   return invoke<void>("trash_items", { paths });
 }

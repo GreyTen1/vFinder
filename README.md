@@ -104,6 +104,16 @@ Runtime dependencies:
       btrfs-progs \
       ntfs-3g
 
+### Optional dependency: ZIP compression
+
+The **Compress as ZIP** context-menu action is shown only when the `zip` command is installed. Install it with your distribution's package manager:
+
+- Ubuntu / Debian: `sudo apt install zip`
+- Arch: `sudo pacman -S zip`
+- Fedora: `sudo dnf install zip`
+
+ZIP support is optional; vFinder works without it and hides the compression action.
+
 
 ## Build from source ##
 

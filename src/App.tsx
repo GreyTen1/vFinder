@@ -20,6 +20,7 @@ import {
   apiArmExternalDrag,
   apiCheckFinderDrag,
   apiCheckPartition,
+  apiCompressItems,
   apiCopyItems,
   apiCreateDirectory,
   apiCreateFile,
@@ -30,6 +31,7 @@ import {
   apiGetFilesByTag,
   apiGetSidebarData,
   apiGetStartupDirectory,
+  apiIsZipAvailable,
   apiMountPartition,
   apiMoveItems,
   apiOpenItem,
@@ -130,6 +132,10 @@ interface ActiveDragState {
   dropTargetTag: string | null;
   dropTargetTagName: string | null;
   dropFavoriteZone: boolean;
+}
+
+interface MoveUndoAction {
+  items: Array<{ movedPath: string; originalParent: string }>;
 }
 
 const DEFAULT_ZOOM_BY_VIEW: Record<ViewMode, number> = {
@@ -439,12 +445,47 @@ export const App: React.FC = () => {
   const [formatVolume, setFormatVolume] = useState<VolumeInfo | null>(null);
   const [firstAidVolume, setFirstAidVolume] = useState<VolumeInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [zipAvailable, setZipAvailable] = useState(false);
+  const [activeOperations, setActiveOperations] = useState<Array<{ id: number; label: string }>>([]);
+  const operationIdRef = useRef(0);
   const [columnActivePath, setColumnActivePath] = useState<string | null>(null);
   const columnActivePathRef = useRef<string | null>(null);
   columnActivePathRef.current = columnActivePath;
   const [sudoPrompt, setSudoPrompt] = useState<SudoPromptState | null>(null);
   const [clipboard, setClipboard] = useState<ClipboardState | null>(null);
+  const undoStackRef = useRef<MoveUndoAction[]>([]);
+  const undoInProgressRef = useRef(false);
   const [toast, setToast] = useState<string | null>(null);
+
+  const runWithActivity = useCallback(async <T,>(
+    label: string,
+    operation: () => Promise<T>
+  ): Promise<T> => {
+    const id = ++operationIdRef.current;
+    const revealTimer = window.setTimeout(() => {
+      setActiveOperations((current) => [...current, { id, label }]);
+    }, 180);
+    try {
+      return await operation();
+    } finally {
+      window.clearTimeout(revealTimer);
+      setActiveOperations((current) => current.filter((item) => item.id !== id));
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiIsZipAvailable()
+      .then((available) => {
+        if (!cancelled) setZipAvailable(available);
+      })
+      .catch(() => {
+        if (!cancelled) setZipAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Download Manager state
   const [downloadQueue, setDownloadQueue] = useState<InterceptedDownload[]>([]);
@@ -792,6 +833,58 @@ export const App: React.FC = () => {
     },
     [activeTab?.path, activeTab?.activeTag, debouncedSearchQuery, showHidden, showToast]
   );
+
+  const recordMoveUndo = useCallback(
+    (sourcePaths: string[], movedPaths: string[]) => {
+      if (sourcePaths.length !== movedPaths.length) return;
+      const items = sourcePaths
+        .slice(0, movedPaths.length)
+        .map((sourcePath, index) => ({
+          movedPath: movedPaths[index],
+          originalParent: getParentPath(sourcePath),
+        }))
+        .filter((item, index) => item.movedPath !== sourcePaths[index]);
+      if (items.length === 0) return;
+      undoStackRef.current.push({ items });
+      if (undoStackRef.current.length > 100) undoStackRef.current.shift();
+    },
+    []
+  );
+
+  const handleUndo = useCallback(async () => {
+    if (undoInProgressRef.current) return;
+    const action = undoStackRef.current[undoStackRef.current.length - 1];
+    if (!action) {
+      showToast("Nothing to undo");
+      return;
+    }
+    undoInProgressRef.current = true;
+
+    const movesByParent = new Map<string, string[]>();
+    for (const item of action.items) {
+      const paths = movesByParent.get(item.originalParent) || [];
+      paths.push(item.movedPath);
+      movesByParent.set(item.originalParent, paths);
+    }
+
+    try {
+      const restoredPaths: string[] = [];
+      await runWithActivity("Undoing move...", async () => {
+        for (const [parent, paths] of movesByParent) {
+          restoredPaths.push(...(await apiMoveItems(paths, parent)));
+        }
+      });
+      undoStackRef.current.pop();
+      await loadCurrentEntries(true);
+      setSplitPaneRefreshVersion((version) => version + 1);
+      setSelectedPaths(restoredPaths);
+      showToast(`Undid move of ${restoredPaths.length} item(s)`);
+    } catch (error) {
+      showToast(`Undo failed: ${error}`);
+    } finally {
+      undoInProgressRef.current = false;
+    }
+  }, [loadCurrentEntries, runWithActivity, showToast]);
 
   useEffect(() => {
     loadCurrentEntries(false);
@@ -1334,7 +1427,9 @@ export const App: React.FC = () => {
         candidate = `${baseName} ${counter++}`;
       }
       try {
-        const created = await apiCreateDirectory(targetDir, candidate);
+        const created = await runWithActivity("Creating folder...", () =>
+          apiCreateDirectory(targetDir, candidate)
+        );
         knownEntriesMapRef.current.set(created.path, created);
         await loadCurrentEntries(true);
         setSelectedPaths([created.path]);
@@ -1354,6 +1449,7 @@ export const App: React.FC = () => {
       entries,
       showHidden,
       loadCurrentEntries,
+      runWithActivity,
       showToast,
     ]
   );
@@ -1386,7 +1482,9 @@ export const App: React.FC = () => {
         candidate = `untitled ${counter++}.txt`;
       }
       try {
-        const created = await apiCreateFile(targetDir, candidate);
+        const created = await runWithActivity("Creating file...", () =>
+          apiCreateFile(targetDir, candidate)
+        );
         knownEntriesMapRef.current.set(created.path, created);
         await loadCurrentEntries(true);
         setSelectedPaths([created.path]);
@@ -1405,6 +1503,7 @@ export const App: React.FC = () => {
       entries,
       showHidden,
       loadCurrentEntries,
+      runWithActivity,
       showToast,
     ]
   );
@@ -1428,7 +1527,9 @@ export const App: React.FC = () => {
     if (!trimmed || (targetEntry && targetEntry.name === trimmed)) return;
 
     try {
-      const updated = await apiRenameItem(renamingPath, trimmed);
+      const updated = await runWithActivity("Renaming item...", () =>
+        apiRenameItem(renamingPath, trimmed)
+      );
       knownEntriesMapRef.current.set(updated.path, updated);
       await loadCurrentEntries(true);
       setSelectedPaths([updated.path]);
@@ -1436,7 +1537,7 @@ export const App: React.FC = () => {
     } catch (err) {
       showToast(`${err}`);
     }
-  }, [renamingPath, renameValue, entries, loadCurrentEntries, showToast]);
+  }, [renamingPath, renameValue, entries, loadCurrentEntries, runWithActivity, showToast]);
 
   // Commit inline names on any outside click, including controls that prevent
   // the input from losing focus (where the input's onBlur would not fire).
@@ -1459,11 +1560,17 @@ export const App: React.FC = () => {
       const targets = entry ? [entry.path] : selectedPaths;
       if (targets.length === 0) return;
       try {
-        const createdPaths: string[] = [];
-        for (const p of targets) {
-          const dup = await apiDuplicateItem(p);
-          createdPaths.push(dup.path);
-        }
+        const createdPaths = await runWithActivity(
+          `Duplicating ${targets.length} item(s)...`,
+          async () => {
+            const created: string[] = [];
+            for (const path of targets) {
+              const duplicate = await apiDuplicateItem(path);
+              created.push(duplicate.path);
+            }
+            return created;
+          }
+        );
         await loadCurrentEntries(true);
         setSelectedPaths(createdPaths);
         showToast(
@@ -1475,7 +1582,26 @@ export const App: React.FC = () => {
         showToast(`${err}`);
       }
     },
-    [selectedPaths, loadCurrentEntries, showToast]
+    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
+  );
+
+  const handleCompress = useCallback(
+    async (entry?: FileEntry) => {
+      const targets = entry ? [entry.path] : selectedPaths;
+      if (targets.length === 0) return;
+      try {
+        const archivePath = await runWithActivity(
+          `Compressing ${targets.length} item(s)...`,
+          () => apiCompressItems(targets)
+        );
+        await loadCurrentEntries(true);
+        setSelectedPaths([archivePath]);
+        showToast(`Created ${archivePath.split(/[\\/]/).pop() || "ZIP archive"}`);
+      } catch (error) {
+        showToast(`Compression failed: ${error}`);
+      }
+    },
+    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
   );
 
   const handleTrash = useCallback(
@@ -1483,7 +1609,9 @@ export const App: React.FC = () => {
       const targets = targetEntry ? [targetEntry.path] : selectedPaths;
       if (targets.length === 0) return;
       try {
-        await apiTrashItems(targets);
+        await runWithActivity(`Moving ${targets.length} item(s) to Trash...`, () =>
+          apiTrashItems(targets)
+        );
         setSelectedPaths([]);
         await loadCurrentEntries(true);
         showToast(`Moved ${targets.length} item(s) to Trash`);
@@ -1491,7 +1619,7 @@ export const App: React.FC = () => {
         showToast(`${err}`);
       }
     },
-    [selectedPaths, loadCurrentEntries, showToast]
+    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
   );
 
   const handleCopy = useCallback(
@@ -1533,21 +1661,35 @@ export const App: React.FC = () => {
       if (!clipboard || !destDir || destDir === "__RECENTS__") return;
       try {
         if (clipboard.mode === "copy") {
-          const created = await apiCopyItems(clipboard.paths, destDir);
+          const created = await runWithActivity(
+            `Copying ${clipboard.paths.length} item(s)...`,
+            async () => {
+              const result = await apiCopyItems(clipboard.paths, destDir);
+              await loadCurrentEntries(true);
+              return result;
+            }
+          );
           setSelectedPaths(created);
           showToast(`Pasted ${created.length} item(s)`);
         } else {
-          const moved = await apiMoveItems(clipboard.paths, destDir);
+          const moved = await runWithActivity(
+            `Moving ${clipboard.paths.length} item(s)...`,
+            async () => {
+              const result = await apiMoveItems(clipboard.paths, destDir);
+              await loadCurrentEntries(true);
+              return result;
+            }
+          );
+          recordMoveUndo(clipboard.paths, moved);
           setSelectedPaths(moved);
           setClipboard(null);
           showToast(`Moved ${moved.length} item(s)`);
         }
-        await loadCurrentEntries(true);
       } catch (err) {
         showToast(`${err}`);
       }
     },
-    [clipboard, contextMenu?.targetDir, viewMode, activeTab?.path, loadCurrentEntries, showToast]
+    [clipboard, contextMenu?.targetDir, viewMode, activeTab?.path, loadCurrentEntries, recordMoveUndo, runWithActivity, showToast]
   );
 
   const handleToggleTag = useCallback(
@@ -1559,12 +1701,18 @@ export const App: React.FC = () => {
             ? currentSelected
             : [path];
 
-        let lastUpdatedTags: string[] = [];
-        for (const targetPath of targets) {
-          lastUpdatedTags = await apiToggleItemTag(targetPath, color);
-        }
-        await loadCurrentEntries(true);
-        await refreshSidebar();
+        const lastUpdatedTags = await runWithActivity(
+          `Updating tags for ${targets.length} item(s)...`,
+          async () => {
+            let updatedTags: string[] = [];
+            for (const targetPath of targets) {
+              updatedTags = await apiToggleItemTag(targetPath, color);
+            }
+            await loadCurrentEntries(true);
+            await refreshSidebar();
+            return updatedTags;
+          }
+        );
         setGetInfoEntry((prev) =>
           prev && prev.path === path
             ? { ...prev, tags: lastUpdatedTags }
@@ -1574,7 +1722,7 @@ export const App: React.FC = () => {
         showToast(`${err}`);
       }
     },
-    [loadCurrentEntries, refreshSidebar, showToast]
+    [loadCurrentEntries, refreshSidebar, runWithActivity, showToast]
   );
 
   const handleSetDefaultApp = useCallback(
@@ -1930,8 +2078,14 @@ export const App: React.FC = () => {
           );
           try {
             if (isCopy) {
-              const copied = await apiCopyItems(dragPaths, destDir);
-              await loadCurrentEntries(true);
+              const copied = await runWithActivity(
+                `Copying ${dragPaths.length} item(s)...`,
+                async () => {
+                  const result = await apiCopyItems(dragPaths, destDir);
+                  await loadCurrentEntries(true);
+                  return result;
+                }
+              );
               if (startedInSplitPane || droppedIntoSplitPane) {
                 setSplitPaneRefreshVersion((version) => version + 1);
               }
@@ -1944,9 +2098,16 @@ export const App: React.FC = () => {
                 (src) => getParentPath(src) !== destDir
               );
               if (sourcesToMove.length > 0) {
-                await apiMoveItems(sourcesToMove, destDir);
+                const moved = await runWithActivity(
+                  `Moving ${sourcesToMove.length} item(s)...`,
+                  async () => {
+                    const result = await apiMoveItems(sourcesToMove, destDir);
+                    await loadCurrentEntries(true);
+                    return result;
+                  }
+                );
+                recordMoveUndo(sourcesToMove, moved);
                 setSelectedPaths([]);
-                await loadCurrentEntries(true);
                 if (startedInSplitPane || droppedIntoSplitPane) {
                   setSplitPaneRefreshVersion((version) => version + 1);
                 }
@@ -2018,7 +2179,7 @@ export const App: React.FC = () => {
       window.addEventListener("mousemove", onMouseMove);
       window.addEventListener("mouseup", onMouseUp);
     },
-    [handleSelectEntry, loadCurrentEntries, refreshSidebar, showToast]
+    [handleSelectEntry, loadCurrentEntries, recordMoveUndo, refreshSidebar, runWithActivity, showToast]
   );
 
   // Cross-App Drag & Drop (Outbound to Brave/Chrome & Inbound from Brave/Chrome/External Apps)
@@ -2128,8 +2289,14 @@ export const App: React.FC = () => {
 
         try {
           showToast(`Saving ${urls.length} dropped item(s) to "${target.targetName}"...`);
-          const saved = await apiSaveDroppedUrls(urls, target.targetPath);
-          await loadCurrentEntries(true);
+          const saved = await runWithActivity(
+            `Saving ${urls.length} dropped item(s)...`,
+            async () => {
+              const result = await apiSaveDroppedUrls(urls, target.targetPath);
+              await loadCurrentEntries(true);
+              return result;
+            }
+          );
           if (target.targetPath === activeTabRef.current?.path) {
             setSelectedPaths(saved);
           }
@@ -2190,8 +2357,15 @@ export const App: React.FC = () => {
           try {
             const isFinderMove = await apiCheckFinderDrag(validSources, true);
             if (isFinderMove) {
-              const moved = await apiMoveItems(validSources, destDir);
-              await loadCurrentEntries(true);
+              const moved = await runWithActivity(
+                `Moving ${validSources.length} item(s)...`,
+                async () => {
+                  const result = await apiMoveItems(validSources, destDir);
+                  await loadCurrentEntries(true);
+                  return result;
+                }
+              );
+              recordMoveUndo(validSources, moved);
               if (destDir === activeTabRef.current?.path) {
                 setSelectedPaths(moved);
               }
@@ -2199,8 +2373,14 @@ export const App: React.FC = () => {
                 `Moved ${moved.length} item(s) to "${target.targetName}"`
               );
             } else {
-              const copied = await apiCopyItems(validSources, destDir);
-              await loadCurrentEntries(true);
+              const copied = await runWithActivity(
+                `Copying ${validSources.length} item(s)...`,
+                async () => {
+                  const result = await apiCopyItems(validSources, destDir);
+                  await loadCurrentEntries(true);
+                  return result;
+                }
+              );
               if (destDir === activeTabRef.current?.path) {
                 setSelectedPaths(copied);
               }
@@ -2225,7 +2405,7 @@ export const App: React.FC = () => {
       unlistenUrlDrop?.();
       unlistenFileDrop?.();
     };
-  }, [loadCurrentEntries, showToast]);
+  }, [loadCurrentEntries, recordMoveUndo, runWithActivity, showToast]);
 
   // Listen for Tauri download manager events
   useEffect(() => {
@@ -2451,8 +2631,11 @@ export const App: React.FC = () => {
         return;
       }
       try {
-        const mountedPath = await apiMountPartition(vol.device);
-        await refreshSidebar();
+        const mountedPath = await runWithActivity(`Mounting ${vol.name}...`, async () => {
+          const path = await apiMountPartition(vol.device);
+          await refreshSidebar();
+          return path;
+        });
         navigateTo(mountedPath, vol.name);
         showToast(`Mounted ${vol.name}`);
       } catch (err) {
@@ -2470,13 +2653,15 @@ export const App: React.FC = () => {
         }
       }
     },
-    [navigateTo, refreshSidebar, showToast]
+    [navigateTo, refreshSidebar, runWithActivity, showToast]
   );
 
   const handleUnmountVolume = useCallback(
     async (vol: VolumeInfo) => {
       try {
-        await apiUnmountPartition(vol.device);
+        await runWithActivity(`Ejecting ${vol.name}...`, () =>
+          apiUnmountPartition(vol.device)
+        );
         if (
           activeTab &&
           vol.mountPoint &&
@@ -2502,7 +2687,7 @@ export const App: React.FC = () => {
         }
       }
     },
-    [activeTab, navigateTo, refreshSidebar, sidebarData?.homeDir, showToast]
+    [activeTab, navigateTo, refreshSidebar, runWithActivity, sidebarData?.homeDir, showToast]
   );
 
   const handleFormatSubmit = useCallback(
@@ -2606,10 +2791,35 @@ export const App: React.FC = () => {
   const scrollEntryIntoView = useCallback((path: string, index?: number) => {
     requestAnimationFrame(() => {
       try {
-        const el = document.querySelector(`[data-entry-path="${CSS.escape(path)}"]`);
+        const selector = `[data-entry-path="${CSS.escape(path)}"]`;
+        const iconContainer =
+          viewMode === "icons"
+            ? document.querySelector<HTMLElement>('[data-tab-scroll-view="icons"]')
+            : null;
+        const el =
+          iconContainer?.querySelector(selector) || document.querySelector(selector);
         if (el) {
           el.scrollIntoView({ block: "nearest", inline: "nearest" });
           return;
+        }
+        if (typeof index === "number" && index >= 0 && viewMode === "icons") {
+          const container = iconContainer;
+          if (container) {
+            const cellWidth = Math.max(96, iconSize + 44);
+            const contentWidth = Math.max(0, container.clientWidth - 40);
+            const columns = Math.max(
+              1,
+              Math.floor((contentWidth + 12) / (cellWidth + 12))
+            );
+            const rowPitch = iconSize + 73;
+            const targetTop = 20 + Math.floor(index / columns) * rowPitch;
+            if (targetTop < container.scrollTop) {
+              container.scrollTop = targetTop;
+            } else if (targetTop + rowPitch > container.scrollTop + container.clientHeight) {
+              container.scrollTop = targetTop + rowPitch - container.clientHeight;
+            }
+            return;
+          }
         }
         if (typeof index === "number" && index >= 0) {
           const container = document.querySelector(".list-view-container");
@@ -2622,7 +2832,7 @@ export const App: React.FC = () => {
         // ignore
       }
     });
-  }, []);
+  }, [viewMode, iconSize]);
 
   useLayoutEffect(() => {
     if (!renamingPath) return;
@@ -2727,6 +2937,17 @@ export const App: React.FC = () => {
 
       const targetEl = e.target as HTMLInputElement | null;
       const tag = targetEl?.tagName;
+      // Delete / Supr moves selected files to Trash, even while search has focus.
+      const isDeleteKey =
+        e.key === "Delete" ||
+        e.key === "Del" ||
+        e.code === "Delete" ||
+        e.keyCode === 46;
+      if (isDeleteKey) {
+        e.preventDefault();
+        handleTrash();
+        return;
+      }
       if (
         e.code === "Space" &&
         !cmdOrCtrl &&
@@ -2744,6 +2965,13 @@ export const App: React.FC = () => {
         tag === "TEXTAREA" ||
         (tag === "INPUT" && targetEl?.type !== "range")
       ) {
+        return;
+      }
+
+      // Ctrl+Z -> Undo the last file move.
+      if (cmdOrCtrl && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        void handleUndo();
         return;
       }
 
@@ -3042,8 +3270,8 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Delete or Ctrl+Backspace -> Move to Trash
-      if (e.key === "Delete" || (cmdOrCtrl && e.key === "Backspace")) {
+      // Ctrl+Backspace -> Move to Trash
+      if (cmdOrCtrl && e.key === "Backspace") {
         e.preventDefault();
         handleTrash();
       }
@@ -3073,6 +3301,7 @@ export const App: React.FC = () => {
     splitPane,
     handleDuplicate,
     handleTrash,
+    handleUndo,
     showToast,
     setIconSize,
     setViewMode,
@@ -3285,8 +3514,14 @@ export const App: React.FC = () => {
       try {
         lastUrlDropTimeRef.current = Date.now();
         showToast(`Saving ${urls.length} dropped item(s) to "${destName}"...`);
-        const saved = await apiSaveDroppedUrls(urls, destPath);
-        await loadCurrentEntries(true);
+        const saved = await runWithActivity(
+          `Saving ${urls.length} dropped item(s)...`,
+          async () => {
+            const result = await apiSaveDroppedUrls(urls, destPath);
+            await loadCurrentEntries(true);
+            return result;
+          }
+        );
         if (destPath === activeTabRef.current?.path) {
           setSelectedPaths(saved);
         }
@@ -3295,7 +3530,7 @@ export const App: React.FC = () => {
         showToast(`Failed to save dropped URL: ${err}`);
       }
     },
-    [loadCurrentEntries, showToast]
+    [loadCurrentEntries, runWithActivity, showToast]
   );
 
   return (
@@ -3589,6 +3824,8 @@ export const App: React.FC = () => {
         }}
         onRename={startRename}
         onDuplicate={handleDuplicate}
+        onCompress={handleCompress}
+        zipAvailable={zipAvailable}
         onCopy={handleCopy}
         onCut={handleCut}
         onPaste={() => handlePaste(contextMenu?.targetDir)}
@@ -3676,6 +3913,33 @@ export const App: React.FC = () => {
               </span>
             )}
           </div>
+        </div>
+      )}
+
+      {activeOperations.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none fixed bottom-4 right-4 z-[70] flex max-w-xs items-center gap-3 rounded-xl border px-3.5 py-3 shadow-xl backdrop-blur-xl ${
+            darkMode
+              ? "border-white/15 bg-[#29292e]/95 text-zinc-100"
+              : "border-black/10 bg-white/95 text-zinc-800"
+          }`}
+        >
+          <span
+            className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-current/20 border-t-[#0a84ff]"
+            aria-hidden="true"
+          />
+          <span className="min-w-0">
+            <span className="block text-xs font-semibold">
+              {activeOperations.length > 1
+                ? `Working on ${activeOperations.length} tasks`
+                : "Working"}
+            </span>
+            <span className="block truncate text-[11px] opacity-70">
+              {activeOperations[0].label}
+            </span>
+          </span>
         </div>
       )}
 
