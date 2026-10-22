@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { FileEntry, FilePreview, FormatTypeOption, SidebarData, InterceptedDownload } from "./types";
+import { ArchiveEntryInfo, FileEntry, FilePreview, FormatTypeOption, SidebarData, InterceptedDownload } from "./types";
 
 const isTauri = () =>
   typeof window !== "undefined" &&
@@ -138,6 +138,14 @@ export async function apiIsZipAvailable(): Promise<boolean> {
 
 export async function apiCompressItems(paths: string[]): Promise<string> {
   return invoke<string>("compress_items", { paths });
+}
+
+export async function apiReadArchiveContents(path: string): Promise<ArchiveEntryInfo[]> {
+  return invoke<ArchiveEntryInfo[]>("read_archive_contents", { path });
+}
+
+export async function apiExtractArchive(path: string): Promise<string> {
+  return invoke<string>("extract_archive", { path });
 }
 
 export async function apiTrashItems(paths: string[]): Promise<void> {

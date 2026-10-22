@@ -59,7 +59,7 @@ interface ToolbarProps {
   onToggleDarkMode: () => void;
   tabs: FinderTab[];
   activeTabId: string;
-  splitTab?: Pick<FinderTab, "id" | "title"> | null;
+  splitTab?: Pick<FinderTab, "id" | "title" | "path" | "archiveWorkspaceRoot"> | null;
   splitTabLeft?: number | null;
   tabStripStartOffset?: number;
   canSplitTab: boolean;
@@ -86,6 +86,21 @@ interface TabDragState {
   detachStarted: boolean;
   lastReorderKey: string | null;
 }
+
+function isInsideArchiveWorkspace(path: string, root?: string): boolean {
+  if (!root) return false;
+  const normalizedPath = path.replace(/\\/g, "/").replace(/\/$/, "");
+  const normalizedRoot = root.replace(/\\/g, "/").replace(/\/$/, "");
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
+
+const ArchiveZipperMark: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <path d="M4 1.75h8v12.5H4z" fill="currentColor" fillOpacity=".13" stroke="currentColor" strokeWidth="1.1" />
+    <path d="M7 2.2v1.4m2 1v1.4m-2 1v1.4m2 1v1.4m-2 1v1.4" stroke="currentColor" strokeWidth="1.15" strokeLinecap="round" />
+    <path d="M8 6.3h3v2.6H8z" fill="currentColor" />
+  </svg>
+);
 
 export const Toolbar: React.FC<ToolbarProps> = ({
   currentTitle,
@@ -939,6 +954,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         >
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
+          const isArchiveWorkspace = isInsideArchiveWorkspace(
+            tab.path,
+            tab.archiveWorkspaceRoot
+          );
           const canDrop = !tab.activeTag && tab.path !== "__RECENTS__";
           const isDropTarget = canDrop && dropTargetPath === tab.path;
           return (
@@ -960,18 +979,32 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   ? "border-[#0a84ff]/70 bg-[#0a84ff]/20 text-white shadow-sm"
                   : isActive
                   ? darkMode
-                    ? "border-white/10 border-b-0 bg-[#202024] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
-                    : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
+                    ? isArchiveWorkspace
+                      ? "border-[#9692D6]/35 border-b-0 bg-[#29273a] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
+                      : "border-white/10 border-b-0 bg-[#202024] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
+                    : isArchiveWorkspace
+                      ? "border-[#807bc0]/30 border-b-0 bg-[#efedf8] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
+                      : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
                   : darkMode
-                  ? "border-transparent bg-white/[0.035] text-zinc-400 hover:bg-white/[0.075] hover:text-zinc-100"
-                  : "border-transparent bg-black/[0.025] text-zinc-600 hover:bg-white/75 hover:text-zinc-900"
+                  ? isArchiveWorkspace
+                    ? "border-[#9692D6]/10 bg-[#9692D6]/[0.07] text-zinc-300 hover:bg-[#9692D6]/[0.13] hover:text-zinc-100"
+                    : "border-transparent bg-white/[0.035] text-zinc-400 hover:bg-white/[0.075] hover:text-zinc-100"
+                  : isArchiveWorkspace
+                    ? "border-[#807bc0]/10 bg-[#807bc0]/[0.06] text-zinc-600 hover:bg-[#807bc0]/[0.12] hover:text-zinc-900"
+                    : "border-transparent bg-black/[0.025] text-zinc-600 hover:bg-white/75 hover:text-zinc-900"
               }`}
             >
-              <Folder
-                className={`w-3.5 h-3.5 shrink-0 ${
-                  isActive ? "text-[#0a84ff]" : "opacity-65"
-                }`}
-              />
+              {isArchiveWorkspace ? (
+                <ArchiveZipperMark
+                  className={`w-3.5 h-3.5 shrink-0 ${isActive ? "text-[#a6a0ef]" : "opacity-70"}`}
+                />
+              ) : (
+                <Folder
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    isActive ? "text-[#0a84ff]" : "opacity-65"
+                  }`}
+                />
+              )}
               <span className="min-w-0 flex-1 truncate text-[11px] font-medium">{tab.title}</span>
               {canSplitTab && !splitTab ? (
                 <button
@@ -1053,6 +1086,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </button>
         </div>
         {splitTab && splitTabLeft !== null && (
+          (() => {
+            const splitIsArchiveWorkspace = isInsideArchiveWorkspace(
+              splitTab.path,
+              splitTab.archiveWorkspaceRoot
+            );
+            return (
           <div
             className="absolute bottom-0 top-0 z-20 flex items-end"
             style={{ left: `${splitTabLeft}px`, right: 0 }}
@@ -1062,15 +1101,23 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               key={splitTab.id}
               className={`workspace-tab-active ${darkMode ? "workspace-tab-active-dark" : "workspace-tab-active-light"} group relative z-20 flex h-8 min-w-[88px] flex-[1_1_220px] max-w-[260px] translate-y-[2px] items-center gap-1.5 rounded-t-xl rounded-b-none border pl-2.5 pr-1.5 text-[11px] font-medium ${
                 darkMode
-                  ? "border-white/10 border-b-0 bg-[#202024] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
-                  : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
+                  ? splitIsArchiveWorkspace
+                    ? "border-[#9692D6]/35 border-b-0 bg-[#29273a] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
+                    : "border-white/10 border-b-0 bg-[#202024] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
+                  : splitIsArchiveWorkspace
+                    ? "border-[#807bc0]/30 border-b-0 bg-[#efedf8] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
+                    : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
               }`}
               style={{ opacity: tabMoveAnimation?.tab.id === splitTab.id ? 0 : undefined }}
               role="tab"
               aria-selected="true"
               title={splitTab.title}
             >
-              <Folder className="h-3.5 w-3.5 shrink-0 text-[#0a84ff]" />
+              {splitIsArchiveWorkspace ? (
+                <ArchiveZipperMark className="h-3.5 w-3.5 shrink-0 text-[#a6a0ef]" />
+              ) : (
+                <Folder className="h-3.5 w-3.5 shrink-0 text-[#0a84ff]" />
+              )}
               <span className="min-w-0 flex-1 truncate">{splitTab.title}</span>
               <span aria-hidden="true" className="h-5 w-5 shrink-0" />
               <button
@@ -1087,6 +1134,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               </button>
             </div>
           </div>
+            );
+          })()
         )}
         {tabMoveAnimation && (
           <div

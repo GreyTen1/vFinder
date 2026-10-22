@@ -1,6 +1,6 @@
 use crate::models::{
     FileEntry, FilePreview, FormatTypeOption, OpenWithConfig, SidebarData, UserDirectory,
-    VolumeInfo,
+    ArchiveEntryInfo, VolumeInfo,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
@@ -1209,7 +1209,8 @@ fn describe_kind(is_dir: bool, ext: &str, mime: &str) -> String {
         "pdf" => "PDF Document".to_string(),
         "mp3" | "wav" | "flac" | "ogg" | "m4a" => "Audio File".to_string(),
         "mp4" | "mkv" | "webm" | "mov" => "Movie".to_string(),
-        "zip" | "tar" | "gz" | "xz" | "zst" | "7z" | "rar" => "Archive".to_string(),
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "tbz" | "tbz2" | "xz" | "txz"
+        | "zst" | "tzst" | "7z" | "rar" => "Archive".to_string(),
         "txt" | "log" => "Plain Text Document".to_string(),
         _ => {
             if mime.starts_with("image/") {
@@ -1243,8 +1244,10 @@ fn fast_mime_type(ext: &str) -> &'static str {
         "pdf" => "application/pdf",
         "zip" => "application/zip",
         "tar" => "application/x-tar",
-        "gz" => "application/gzip",
-        "xz" => "application/x-xz",
+        "gz" | "tgz" => "application/gzip",
+        "bz2" | "tbz" | "tbz2" => "application/x-bzip2",
+        "xz" | "txz" => "application/x-xz",
+        "zst" | "tzst" => "application/zstd",
         "7z" => "application/x-7z-compressed",
         "rar" => "application/vnd.rar",
         "mp3" => "audio/mpeg",
@@ -1951,6 +1954,216 @@ pub async fn compress_items(paths: Vec<String>) -> Result<String, String> {
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn read_archive_contents(path: String) -> Result<Vec<ArchiveEntryInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive_path = Path::new(&path);
+        if archive_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_lowercase().ends_with(".zip"))
+            .unwrap_or(false)
+        {
+            let file = fs::File::open(&path)
+                .map_err(|error| format!("Could not open ZIP archive: {error}"))?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|error| format!("Could not read ZIP archive: {error}"))?;
+            let mut entries = Vec::with_capacity(archive.len());
+            for index in 0..archive.len() {
+                let entry = archive
+                    .by_index(index)
+                    .map_err(|error| format!("Could not read ZIP entry: {error}"))?;
+                entries.push(ArchiveEntryInfo {
+                    name: entry.name().to_string(),
+                    is_dir: entry.is_dir(),
+                    size: entry.size(),
+                });
+            }
+            return Ok(entries);
+        }
+
+        let reader = open_tarball_reader(archive_path)?;
+        let mut archive = tar::Archive::new(reader);
+        let archive_entries = archive
+            .entries()
+            .map_err(|error| format!("Could not read TAR archive: {error}"))?;
+        let mut entries = Vec::new();
+        for entry in archive_entries {
+            let entry = entry.map_err(|error| format!("Could not read TAR entry: {error}"))?;
+            let name = entry
+                .path()
+                .map_err(|error| format!("Could not read TAR entry path: {error}"))?
+                .to_string_lossy()
+                .into_owned();
+            entries.push(ArchiveEntryInfo {
+                name,
+                is_dir: entry.header().entry_type().is_dir(),
+                size: entry.size(),
+            });
+        }
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn extract_archive(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive_path = PathBuf::from(&path);
+        let parent = archive_path
+            .parent()
+            .ok_or_else(|| "Cannot determine archive folder".to_string())?;
+        let archive_name = archive_output_name(&archive_path)?;
+        let output_dir = unique_destination_path(parent, &archive_name);
+        fs::create_dir(&output_dir)
+            .map_err(|error| format!("Could not create extraction folder: {error}"))?;
+
+        let extraction_result = (|| -> Result<(), String> {
+            let name = archive_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            if name.ends_with(".zip") {
+                let file = fs::File::open(&archive_path)
+                    .map_err(|error| format!("Could not open ZIP archive: {error}"))?;
+                let mut archive = zip::ZipArchive::new(file)
+                    .map_err(|error| format!("Could not read ZIP archive: {error}"))?;
+
+                for index in 0..archive.len() {
+                    let mut entry = archive
+                        .by_index(index)
+                        .map_err(|error| format!("Could not read ZIP entry: {error}"))?;
+                    let relative_path = entry
+                        .enclosed_name()
+                        .ok_or_else(|| format!("Unsafe path in ZIP archive: {}", entry.name()))?
+                        .to_path_buf();
+                    let is_symlink = entry
+                        .unix_mode()
+                        .map(|mode| mode & 0o170000 == 0o120000)
+                        .unwrap_or(false);
+                    if is_symlink {
+                        return Err(format!(
+                            "Archive extraction does not allow symbolic links: {}",
+                            entry.name()
+                        ));
+                    }
+
+                    let destination = output_dir.join(relative_path);
+                    if entry.is_dir() {
+                        fs::create_dir_all(&destination)
+                            .map_err(|error| format!("Could not create folder: {error}"))?;
+                        continue;
+                    }
+
+                    let destination_parent = destination
+                        .parent()
+                        .ok_or_else(|| "Invalid file path in ZIP archive".to_string())?;
+                    fs::create_dir_all(destination_parent)
+                        .map_err(|error| format!("Could not create folder: {error}"))?;
+                    let mut output = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&destination)
+                        .map_err(|error| format!("Could not create extracted file: {error}"))?;
+                    std::io::copy(&mut entry, &mut output)
+                        .map_err(|error| format!("Could not extract file: {error}"))?;
+                }
+            } else {
+                let reader = open_tarball_reader(&archive_path)?;
+                let mut archive = tar::Archive::new(reader);
+                let entries = archive
+                    .entries()
+                    .map_err(|error| format!("Could not read TAR archive: {error}"))?;
+                for entry in entries {
+                    let mut entry = entry
+                        .map_err(|error| format!("Could not read TAR entry: {error}"))?;
+                    let entry_type = entry.header().entry_type();
+                    if !entry_type.is_file() && !entry_type.is_dir() {
+                        return Err(format!(
+                            "Archive extraction does not allow links or special files: {}",
+                            entry
+                                .path()
+                                .map(|path| path.to_string_lossy().into_owned())
+                                .unwrap_or_else(|_| "unknown entry".to_string())
+                        ));
+                    }
+                    let extracted = entry
+                        .unpack_in(&output_dir)
+                        .map_err(|error| format!("Could not extract TAR entry: {error}"))?;
+                    if !extracted {
+                        return Err("Unsafe path in TAR archive".to_string());
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = extraction_result {
+            let _ = fs::remove_dir_all(&output_dir);
+            return Err(error);
+        }
+
+        bump_cache_version();
+        Ok(output_dir.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn archive_output_name(path: &Path) -> Result<String, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Invalid archive name".to_string())?;
+    let lower_name = file_name.to_lowercase();
+    let suffixes = [
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lzma", ".tgz", ".tbz2", ".tbz", ".txz",
+        ".tzst", ".tar", ".zip",
+    ];
+    let stem = suffixes
+        .iter()
+        .find_map(|suffix| lower_name.strip_suffix(suffix).map(|_| &file_name[..file_name.len() - suffix.len()]));
+    Ok(stem
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("Extracted")
+        .to_string())
+}
+
+fn open_tarball_reader(path: &Path) -> Result<Box<dyn Read>, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let file = fs::File::open(path)
+        .map_err(|error| format!("Could not open TAR archive: {error}"))?;
+
+    if file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz") {
+        Ok(Box::new(flate2::read::GzDecoder::new(file)))
+    } else if file_name.ends_with(".tar.bz2")
+        || file_name.ends_with(".tbz2")
+        || file_name.ends_with(".tbz")
+    {
+        Ok(Box::new(bzip2::read::BzDecoder::new(file)))
+    } else if file_name.ends_with(".tar.xz") || file_name.ends_with(".txz") {
+        Ok(Box::new(lzma_rust2::XzReader::new(file, true)))
+    } else if file_name.ends_with(".tar.zst") || file_name.ends_with(".tzst") {
+        zstd::stream::read::Decoder::new(file)
+            .map(|reader| Box::new(reader) as Box<dyn Read>)
+            .map_err(|error| format!("Could not read compressed TAR archive: {error}"))
+    } else if file_name.ends_with(".tar.lzma") {
+        lzma_rust2::LzmaReader::new_mem_limit(file, 512 * 1024, None)
+            .map(|reader| Box::new(reader) as Box<dyn Read>)
+            .map_err(|error| format!("Could not read compressed TAR archive: {error}"))
+    } else if file_name.ends_with(".tar") {
+        Ok(Box::new(file))
+    } else {
+        Err("Unsupported archive format".to_string())
+    }
 }
 
 #[tauri::command]

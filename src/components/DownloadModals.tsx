@@ -31,7 +31,9 @@ import {
  * ========================================================================== */
 function getDownloadIcon(filename: string, className = "w-8 h-8") {
   const ext = filename.split(".").pop()?.toLowerCase() || "";
-  if (["zip", "tar", "gz", "xz", "7z", "rar", "bz2", "zst", "deb", "rpm"].includes(ext)) {
+  if (
+    ["zip", "tar", "gz", "tgz", "xz", "txz", "7z", "rar", "bz2", "tbz", "tbz2", "zst", "tzst", "lzma", "deb", "rpm"].includes(ext)
+  ) {
     return <FileArchive className={`${className} text-amber-500`} />;
   }
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"].includes(ext)) {

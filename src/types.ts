@@ -17,6 +17,12 @@ export interface FileEntry {
   defaultApp?: string | null;
 }
 
+export interface ArchiveEntryInfo {
+  name: string;
+  isDir: boolean;
+  size: number;
+}
+
 export interface UserDirectory {
   id: string;
   name: string;
@@ -72,6 +78,7 @@ export interface FinderTab {
   id: string;
   title: string;
   path: string;
+  archiveWorkspaceRoot?: string;
   history: string[];
   historyIndex: number;
   activeTag?: string | null;

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { Archive, Loader2 } from "lucide-react";
 import {
   ClipboardState,
   FileEntry,
@@ -32,6 +33,7 @@ import {
   apiGetSidebarData,
   apiGetStartupDirectory,
   apiIsZipAvailable,
+  apiExtractArchive,
   apiMountPartition,
   apiMoveItems,
   apiOpenItem,
@@ -233,6 +235,7 @@ export const App: React.FC = () => {
     path: string;
     title: string;
     activeTag: string | null;
+    archiveWorkspaceRoot?: string;
     key: number;
   } | null>(null);
   const splitPaneHoveredRef = useRef(false);
@@ -447,6 +450,7 @@ export const App: React.FC = () => {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [zipAvailable, setZipAvailable] = useState(false);
   const [activeOperations, setActiveOperations] = useState<Array<{ id: number; label: string }>>([]);
+  const [openingArchive, setOpeningArchive] = useState<string | null>(null);
   const operationIdRef = useRef(0);
   const [columnActivePath, setColumnActivePath] = useState<string | null>(null);
   const columnActivePathRef = useRef<string | null>(null);
@@ -1153,6 +1157,7 @@ export const App: React.FC = () => {
         path: tab.path || sidebarData?.homeDir || "/",
         title: tab.title,
         activeTag: tab.activeTag || null,
+        archiveWorkspaceRoot: tab.archiveWorkspaceRoot,
         key: Date.now(),
       });
     },
@@ -1352,6 +1357,35 @@ export const App: React.FC = () => {
     []
   );
 
+  const handleBrowseArchive = useCallback(
+    async (path: string) => {
+      const archiveName = path.split(/[\\/]/).pop() || path;
+      setOpeningArchive(archiveName);
+      try {
+        const destination = await runWithActivity(
+          `Opening ${archiveName}...`,
+          () => apiExtractArchive(path)
+        );
+        await loadCurrentEntries(true);
+        setSplitPaneRefreshVersion((version) => version + 1);
+        navigateTo(destination, archiveName);
+        setTabs((tabs) =>
+          tabs.map((tab) =>
+            tab.id === activeTabId
+              ? { ...tab, archiveWorkspaceRoot: destination }
+              : tab
+          )
+        );
+        showToast(`Opened extracted copy of ${archiveName}`);
+      } catch (error) {
+        showToast(`Could not open archive: ${error}`);
+      } finally {
+        setOpeningArchive(null);
+      }
+    },
+    [activeTabId, loadCurrentEntries, navigateTo, runWithActivity, showToast]
+  );
+
   const handleOpenEntry = useCallback(
     async (entry: FileEntry) => {
       knownEntriesMapRef.current.set(entry.path, entry);
@@ -1387,6 +1421,12 @@ export const App: React.FC = () => {
 
       if (entry.isDir) {
         navigateTo(entry.path, entry.name);
+      } else if (
+        /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2?|tar\.xz|txz|tar\.zst|tzst|tar\.lzma)$/i.test(
+          entry.name
+        )
+      ) {
+        void handleBrowseArchive(entry.path);
       } else {
         try {
           await apiOpenItem(entry.path);
@@ -1395,7 +1435,7 @@ export const App: React.FC = () => {
         }
       }
     },
-    [navigateTo, showToast]
+    [handleBrowseArchive, navigateTo, showToast]
   );
 
   // File Operations
@@ -1602,6 +1642,25 @@ export const App: React.FC = () => {
       }
     },
     [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
+  );
+
+  const handleExtractArchive = useCallback(
+    async (path: string) => {
+      const archiveName = path.split(/[\\/]/).pop() || path;
+      try {
+        const destination = await runWithActivity(
+          `Extracting ${archiveName}...`,
+          () => apiExtractArchive(path)
+        );
+        await loadCurrentEntries(true);
+        setSplitPaneRefreshVersion((version) => version + 1);
+        setSelectedPaths([destination]);
+        showToast(`Extracted to ${destination.split(/[\\/]/).pop() || destination}`);
+      } catch (error) {
+        showToast(`Extraction failed: ${error}`);
+      }
+    },
+    [loadCurrentEntries, runWithActivity, showToast]
   );
 
   const handleTrash = useCallback(
@@ -3436,9 +3495,16 @@ export const App: React.FC = () => {
   const activeDropTargetPath =
     dragState?.dropTargetPath ||
     (externalDropInfo?.isSpecificFolder ? externalDropInfo.targetPath : null);
+  const archiveRoot = activeTab?.archiveWorkspaceRoot?.replace(/\\/g, "/").replace(/\/$/, "");
+  const activePath = activeTab?.path.replace(/\\/g, "/").replace(/\/$/, "") || "";
+  const isArchiveWorkspace = Boolean(
+    archiveRoot &&
+      (activePath === archiveRoot || activePath.startsWith(`${archiveRoot}/`))
+  );
 
   const commonViewProps = {
     entries: sortedEntries,
+    isArchiveWorkspace,
     selectedPaths,
     onSelect: handleSelectEntry,
     onSetSelection: setSelectedPaths,
@@ -3582,7 +3648,12 @@ export const App: React.FC = () => {
         onToggleDarkMode={() => setDarkMode((v) => !v)}
         tabs={splitPane ? tabs.filter((tab) => tab.id !== splitPane.tabId) : tabs}
         activeTabId={activeTabId}
-        splitTab={splitPane ? { id: splitPane.tabId, title: splitPane.title } : null}
+        splitTab={splitPane ? {
+          id: splitPane.tabId,
+          title: splitPane.title,
+          path: splitPane.path,
+          archiveWorkspaceRoot: splitPane.archiveWorkspaceRoot,
+        } : null}
         splitTabLeft={splitTabLeft}
         tabStripStartOffset={sidebarLayoutOpen ? 240 : 0}
         canSplitTab={tabs.length >= 2}
@@ -3656,6 +3727,12 @@ export const App: React.FC = () => {
 
         <main
           className={`macos-layer-isolate relative flex-1 flex flex-col min-w-0 overflow-hidden transition-colors ${
+            isArchiveWorkspace
+              ? darkMode
+                ? "bg-[#252431]"
+                : "bg-[#f7f5fd]"
+              : ""
+          } ${
             externalDropInfo && !externalDropInfo.isSpecificFolder
               ? "ring-2 ring-inset ring-[#0a84ff]/80 bg-[#0a84ff]/5"
               : ""
@@ -3826,6 +3903,8 @@ export const App: React.FC = () => {
         onDuplicate={handleDuplicate}
         onCompress={handleCompress}
         zipAvailable={zipAvailable}
+        onViewArchive={(entry) => void handleBrowseArchive(entry.path)}
+        onExtractArchive={(entry) => void handleExtractArchive(entry.path)}
         onCopy={handleCopy}
         onCut={handleCut}
         onPaste={() => handlePaste(contextMenu?.targetDir)}
@@ -3940,6 +4019,33 @@ export const App: React.FC = () => {
               {activeOperations[0].label}
             </span>
           </span>
+        </div>
+      )}
+
+      {openingArchive && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/35 backdrop-blur-[2px]"
+          role="presentation"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-live="polite"
+            aria-label={`Opening ${openingArchive}`}
+            className={`flex w-[min(340px,calc(100vw-40px))] flex-col items-center gap-3 rounded-2xl border px-8 py-7 text-center shadow-2xl backdrop-blur-xl ${
+              darkMode
+                ? "border-white/15 bg-[#29292e]/95 text-zinc-100"
+                : "border-black/10 bg-white/95 text-zinc-900"
+            }`}
+          >
+            <div className="relative flex h-12 w-12 items-center justify-center rounded-xl bg-[#9692D6]/15 text-[#9692D6]">
+              <Archive className="h-6 w-6" />
+              <Loader2 className="absolute -right-1 -top-1 h-5 w-5 animate-spin rounded-full bg-inherit" />
+            </div>
+            <span className="text-sm font-semibold">Opening archive…</span>
+            <span className="max-w-full truncate text-xs opacity-60">{openingArchive}</span>
+            <span className="text-[11px] opacity-45">Extracting contents for browsing</span>
+          </div>
         </div>
       )}
 

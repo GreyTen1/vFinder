@@ -411,6 +411,8 @@ fn main() {
             commands::duplicate_item,
             commands::is_zip_available,
             commands::compress_items,
+            commands::read_archive_contents,
+            commands::extract_archive,
             commands::trash_items,
             commands::open_item,
             commands::open_item_with,

@@ -25,6 +25,12 @@ mime_guess = "2.0"
 base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 md-5 = "0.11.0"
+zip = "8.6"
+tar = "0.4"
+flate2 = "1"
+bzip2 = "0.6"
+zstd = "0.13"
+lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

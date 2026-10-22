@@ -60,6 +60,7 @@ export interface CommonViewProps {
   sortDirection: SortDirection;
   onChangeSort: (field: SortField) => void;
   showHidden: boolean;
+  isArchiveWorkspace?: boolean;
   onToggleTag: (path: string, color: string) => void;
   onQuickLook: () => void;
 }
@@ -995,6 +996,7 @@ export const ListView: React.FC<CommonViewProps> = ({
   sortDirection,
   onChangeSort,
   showHidden,
+  isArchiveWorkspace = false,
 }) => {
   const zoomScale = iconSize / 64;
   const rowIconSize = Math.max(14, Math.min(36, Math.round(18 * zoomScale)));
@@ -1414,8 +1416,12 @@ export const ListView: React.FC<CommonViewProps> = ({
         <div
           className={`sticky top-0 z-10 flex items-center h-7 text-[11px] font-semibold border-b select-none ${
             darkMode
-              ? "bg-[#202024] border-white/10 text-zinc-400"
-              : "bg-[#f2f2f5] border-black/10 text-zinc-500"
+              ? isArchiveWorkspace
+                ? "bg-[#2c293c] border-[#9692D6]/20 text-zinc-300"
+                : "bg-[#202024] border-white/10 text-zinc-400"
+              : isArchiveWorkspace
+                ? "bg-[#efedf8] border-[#807bc0]/20 text-zinc-600"
+                : "bg-[#f2f2f5] border-black/10 text-zinc-500"
           }`}
         >
           <div

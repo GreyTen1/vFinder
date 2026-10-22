@@ -286,6 +286,10 @@ function renderDocumentIcon(
   className: string,
   containerRef?: React.RefObject<HTMLDivElement>
 ) {
+  const isArchive = [
+    "zip", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz",
+    "zst", "tzst", "lzma", "7z", "rar",
+  ].includes(ext);
   let badgeColor = "#0A84FF";
   let badgeText = ext ? ext.slice(0, 4).toUpperCase() : "FILE";
 
@@ -307,9 +311,9 @@ function renderDocumentIcon(
   } else if (ext === "pdf") {
     badgeColor = "#FF453A";
     badgeText = "PDF";
-  } else if (["zip", "tar", "gz", "xz", "zst", "7z", "rar"].includes(ext)) {
-    badgeColor = "#AC8E68";
-    badgeText = "ZIP";
+  } else if (isArchive) {
+    badgeColor = "#9692D6";
+    badgeText = ext ? ext.toUpperCase().slice(0, 4) : "ARC";
   } else if (["md", "txt", "log"].includes(ext)) {
     badgeColor = "#64D2FF";
     badgeText = ext ? ext.toUpperCase() : "TXT";
@@ -347,17 +351,25 @@ function renderDocumentIcon(
 
         {/* Colored extension badge */}
         <rect x="17" y="41" width="30" height="11" rx="3.5" fill={badgeColor} />
-        <text
-          x="32"
-          y="49"
-          textAnchor="middle"
-          fill="white"
-          fontSize="7.5"
-          fontWeight="700"
-          fontFamily="-apple-system, BlinkMacSystemFont, sans-serif"
-        >
-          {badgeText}
-        </text>
+        {isArchive ? (
+          <g stroke="white" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M32 42.5v8" strokeWidth="1.4" />
+            <path d="M29.5 43.1h2m1 1.8h2m-5 1.8h2m1 1.8h2m-5 1.8h2" strokeWidth="1.2" />
+            <path d="M31 45.1h3v2.4h-3z" fill="white" strokeWidth=".6" />
+          </g>
+        ) : (
+          <text
+            x="32"
+            y="49"
+            textAnchor="middle"
+            fill="white"
+            fontSize="7.5"
+            fontWeight="700"
+            fontFamily="-apple-system, BlinkMacSystemFont, sans-serif"
+          >
+            {badgeText}
+          </text>
+        )}
       </svg>
 
       {isSymlink && (
