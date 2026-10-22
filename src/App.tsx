@@ -29,6 +29,7 @@ import {
   apiGetFileInfo,
   apiGetFilesByTag,
   apiGetSidebarData,
+  apiGetStartupDirectory,
   apiMountPartition,
   apiMoveItems,
   apiOpenItem,
@@ -616,7 +617,7 @@ export const App: React.FC = () => {
   }, [showToast]);
 
   useEffect(() => {
-    refreshSidebar().then((data) => {
+    Promise.all([refreshSidebar(), apiGetStartupDirectory()]).then(([data, startupDirectory]) => {
       if (data?.homeDir) {
         setTabs((prev) => {
           if (
@@ -626,12 +627,13 @@ export const App: React.FC = () => {
               prev[0].path === data.homeDir) &&
             !prev[0].activeTag
           ) {
+            const initialPath = startupDirectory || data.homeDir;
             return [
               {
                 id: prev[0].id || "tab-1",
-                title: "Home",
-                path: data.homeDir,
-                history: [data.homeDir],
+                title: startupDirectory ? folderDisplayName(startupDirectory) : "Home",
+                path: initialPath,
+                history: [initialPath],
                 historyIndex: 0,
                 activeTag: null,
               },
@@ -2635,6 +2637,25 @@ export const App: React.FC = () => {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const cmdOrCtrl = e.ctrlKey;
+
+      // Focus the toolbar search field (and select its query) from anywhere.
+      if (cmdOrCtrl && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        const searchInput = document.querySelector<HTMLInputElement>("[data-file-search]");
+        searchInput?.focus();
+        searchInput?.select();
+        return;
+      }
+
+      if (e.key === "Escape") {
+        const searchInput = document.querySelector<HTMLInputElement>("[data-file-search]");
+        if (document.activeElement === searchInput) {
+          e.preventDefault();
+          setSearchQuery("");
+          searchInput?.blur();
+          return;
+        }
+      }
 
       // Zoom In: Ctrl + Plus / Equal (always active)
       if (

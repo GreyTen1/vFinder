@@ -27,6 +27,13 @@ use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 use tauri::window::Color;
 
+static STARTUP_DIRECTORY: OnceLock<Option<String>> = OnceLock::new();
+
+#[tauri::command]
+fn get_startup_directory() -> Option<String> {
+    STARTUP_DIRECTORY.get().cloned().flatten()
+}
+
 static ARMED_DRAG_PATHS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static ACTIVE_OUTBOUND_PATHS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 pub static OUTBOUND_DRAG_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -357,6 +364,14 @@ pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
 }
 
 fn main() {
+    let startup_directory = std::env::args_os()
+        .skip(1)
+        .find(|arg| !arg.to_string_lossy().starts_with('-'))
+        .and_then(|arg| std::path::PathBuf::from(arg).canonicalize().ok())
+        .filter(|path| path.is_dir())
+        .map(|path| path.to_string_lossy().into_owned());
+    let _ = STARTUP_DIRECTORY.set(startup_directory);
+
     tauri::Builder::default()
         .setup(|app| {
             #[cfg(target_os = "linux")]
@@ -385,6 +400,7 @@ fn main() {
             commands::read_directory,
             commands::prefetch_directories,
             commands::get_sidebar_data,
+            get_startup_directory,
             commands::mount_partition,
             commands::unmount_partition,
             commands::create_directory,

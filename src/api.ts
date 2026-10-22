@@ -39,6 +39,11 @@ export async function apiGetSidebarData(): Promise<SidebarData> {
   return invoke<SidebarData>("get_sidebar_data");
 }
 
+export async function apiGetStartupDirectory(): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string | null>("get_startup_directory");
+}
+
 export async function apiMountPartition(
   device: string,
   password?: string
