@@ -312,6 +312,7 @@ interface GetInfoModalProps {
     program: string,
     applyToExtension: boolean
   ) => Promise<void>;
+  onSetExecutable?: (path: string, executable: boolean) => Promise<void>;
   darkMode: boolean;
 }
 
@@ -321,9 +322,11 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
   onClose,
   onToggleTag,
   onSetDefaultApp,
+  onSetExecutable,
   darkMode,
 }) => {
   const [appInput, setAppInput] = useState("");
+  const [executableBusy, setExecutableBusy] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   useToolbarOutsideDismiss(dialogRef, Boolean(entry || volume), onClose);
 
@@ -634,6 +637,23 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
           <div className="text-[11px] font-semibold opacity-55">
             Sharing & Permissions:
           </div>
+          {!entry.isDir && onSetExecutable && (
+            <label className="flex items-center gap-2 py-1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={entry.permissions.slice(1).includes("x")}
+                disabled={executableBusy}
+                onChange={(event) => {
+                  setExecutableBusy(true);
+                  void onSetExecutable(entry.path, event.target.checked).finally(
+                    () => setExecutableBusy(false)
+                  );
+                }}
+                className="h-3.5 w-3.5 accent-[#0a84ff]"
+              />
+              <span>Allow executing file as program</span>
+            </label>
+          )}
           <div className="flex justify-between">
             <span className="opacity-60">Unix Mode</span>
             <span className="font-mono">{entry.permissions}</span>

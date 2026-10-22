@@ -427,6 +427,7 @@ fn main() {
             commands::open_detached_tab_window,
             commands::get_image_thumbnail,
             commands::get_file_info,
+            commands::set_file_executable,
             commands::get_available_format_types,
             commands::format_partition,
             commands::check_partition,

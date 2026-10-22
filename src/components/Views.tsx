@@ -430,6 +430,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
     onRenameCancel,
   }) => {
     const maxW = Math.max(120, iconSize + 44);
+    const showFullName = isSelected;
     return (
       <div
         data-entry-path={entry.path}
@@ -515,7 +516,11 @@ const IconViewItem = React.memo<IconViewItemProps>(
               onStartRename(entry);
             }}
             onClick={(e) => e.stopPropagation()}
-            className={`mt-1.5 px-2 py-0.5 rounded-md text-[12px] leading-tight text-center max-w-full flex items-center justify-center gap-1 ${
+            className={`mt-1.5 px-2 py-0.5 rounded-md text-[12px] leading-tight max-w-full flex gap-1 ${
+              showFullName
+                ? "w-full flex-col items-center justify-center"
+                : "items-center justify-center text-center"
+            } ${
               isDropTarget || isSelected
                 ? isDropTarget
                   ? "bg-[#0a84ff]/25 text-white font-medium"
@@ -527,7 +532,11 @@ const IconViewItem = React.memo<IconViewItemProps>(
                 : "text-zinc-800"
             }`}
           >
-            <span className="truncate">{entry.name}</span>
+            <span
+              className={showFullName ? "block w-full min-w-0 whitespace-normal break-words text-center [overflow-wrap:anywhere]" : "truncate"}
+            >
+              {entry.name}
+            </span>
             <TagDots tags={entry.tags} />
           </div>
         )}

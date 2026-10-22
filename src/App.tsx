@@ -29,6 +29,7 @@ import {
   apiDuplicateItem,
   apiFormatPartition,
   apiGetFileInfo,
+  apiSetFileExecutable,
   apiGetFilesByTag,
   apiGetSidebarData,
   apiGetStartupDirectory,
@@ -1713,6 +1714,7 @@ export const App: React.FC = () => {
             }
           );
           setSelectedPaths(created);
+          setClipboard((current) => (current === clipboard ? null : current));
           showToast(`Pasted ${created.length} item(s)`);
         } else {
           const moved = await runWithActivity(
@@ -1725,7 +1727,7 @@ export const App: React.FC = () => {
           );
           recordMoveUndo(clipboard.paths, moved);
           setSelectedPaths(moved);
-          setClipboard(null);
+          setClipboard((current) => (current === clipboard ? null : current));
           showToast(`Moved ${moved.length} item(s)`);
         }
       } catch (err) {
@@ -3468,6 +3470,19 @@ export const App: React.FC = () => {
     [showToast]
   );
 
+  const handleSetFileExecutable = useCallback(
+    async (path: string, executable: boolean) => {
+      try {
+        await apiSetFileExecutable(path, executable);
+        await loadCurrentEntries(true);
+        setGetInfoEntry(await apiGetFileInfo(path));
+      } catch (error) {
+        showToast(`Could not update executable permission: ${error}`);
+      }
+    },
+    [loadCurrentEntries, showToast]
+  );
+
   const handleCancelRename = useCallback(() => {
     setRenamingPath(null);
   }, []);
@@ -3846,6 +3861,7 @@ export const App: React.FC = () => {
           setGetInfoVolume(null);
         }}
         onToggleTag={handleToggleTag}
+        onSetExecutable={handleSetFileExecutable}
         onSetDefaultApp={handleSetDefaultApp}
         darkMode={darkMode}
       />

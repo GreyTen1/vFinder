@@ -238,6 +238,10 @@ export async function apiGetFileInfo(path: string): Promise<FileEntry> {
   return invoke<FileEntry>("get_file_info", { path });
 }
 
+export async function apiSetFileExecutable(path: string, executable: boolean): Promise<void> {
+  return invoke<void>("set_file_executable", { path, executable });
+}
+
 export async function apiGetAvailableFormatTypes(): Promise<FormatTypeOption[]> {
   if (!isTauri()) {
     return [

@@ -290,6 +290,11 @@ function renderDocumentIcon(
     "zip", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz",
     "zst", "tzst", "lzma", "7z", "rar",
   ].includes(ext);
+  const archiveLabel = ext === "zip"
+    ? "ZIP"
+    : ["tar", "tgz", "tbz", "tbz2", "txz", "tzst"].includes(ext)
+      ? "TAR"
+      : "ARC";
   let badgeColor = "#0A84FF";
   let badgeText = ext ? ext.slice(0, 4).toUpperCase() : "FILE";
 
@@ -332,6 +337,32 @@ function renderDocumentIcon(
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >
+        <defs>
+          <linearGradient id="macos-doc-page" x1="32" y1="6" x2="32" y2="58" gradientUnits="userSpaceOnUse">
+            <stop stopColor="#FFFFFF" />
+            <stop offset="1" stopColor="#EEF1F5" />
+          </linearGradient>
+          <linearGradient id="archive-zipper-metal" x1="27" y1="32" x2="37" y2="40" gradientUnits="userSpaceOnUse">
+            <stop stopColor="#F8FAFC" />
+            <stop offset=".45" stopColor="#AEB5BF" />
+            <stop offset="1" stopColor="#747B86" />
+          </linearGradient>
+          <linearGradient id="archive-fold" x1="39" y1="7" x2="47" y2="16" gradientUnits="userSpaceOnUse">
+            <stop stopColor="#E9EDF2" />
+            <stop offset="1" stopColor="#D3D9E1" />
+          </linearGradient>
+          <filter id="archive-page-shadow" x="9" y="4" width="47" height="59" colorInterpolationFilters="sRGB" filterUnits="userSpaceOnUse">
+            <feGaussianBlur stdDeviation="1.3" />
+          </filter>
+        </defs>
+        {isArchive && (
+          <path
+            d="M14 11C14 8.23858 16.2386 6 19 6H38.5L50 17.5V53C50 55.7614 47.7614 58 45 58H19C16.2386 58 14 55.7614 14 53V11Z"
+            fill="#64748B"
+            opacity=".18"
+            filter="url(#archive-page-shadow)"
+          />
+        )}
         {/* Document Page with Folded Corner */}
         <path
           d="M14 11C14 8.23858 16.2386 6 19 6H38.5L50 17.5V53C50 55.7614 47.7614 58 45 58H19C16.2386 58 14 55.7614 14 53V11Z"
@@ -342,33 +373,49 @@ function renderDocumentIcon(
         {/* Dog-ear fold */}
         <path
           d="M38.5 6L50 17.5H41.5C39.8431 17.5 38.5 16.1569 38.5 14.5V6Z"
-          fill="#D0D7DE"
+          fill={isArchive ? "url(#archive-fold)" : "#D0D7DE"}
         />
-        {/* Subtle document lines */}
-        <rect x="20" y="23" width="18" height="2.4" rx="1.2" fill="#CBD5E1" />
-        <rect x="20" y="28.5" width="24" height="2.4" rx="1.2" fill="#CBD5E1" />
-        <rect x="20" y="34" width="15" height="2.4" rx="1.2" fill="#CBD5E1" />
-
-        {/* Colored extension badge */}
-        <rect x="17" y="41" width="30" height="11" rx="3.5" fill={badgeColor} />
         {isArchive ? (
-          <g stroke="white" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M32 42.5v8" strokeWidth="1.4" />
-            <path d="M29.5 43.1h2m1 1.8h2m-5 1.8h2m1 1.8h2m-5 1.8h2" strokeWidth="1.2" />
-            <path d="M31 45.1h3v2.4h-3z" fill="white" strokeWidth=".6" />
+          <g strokeLinecap="round" strokeLinejoin="round">
+            {/* Recessed metal track */}
+            <rect x="27.5" y="21.5" width="9" height="25" rx="3" fill="#E2E6EB" stroke="#B2B8C1" strokeWidth=".8" />
+            <path d="M29.5 23v22m5-22v22" stroke="#8A919B" strokeWidth=".75" />
+            {/* Alternating zipper teeth */}
+            <path
+              d="M29.5 23.5h2l1.5 1.5 1.5-1.5h.5m-5 4.1h.5l1.5-1.5 1.5 1.5h1.5m-5 4.1h2l1.5 1.5 1.5-1.5h.5m-5 4.1h.5l1.5-1.5 1.5 1.5h1.5m-5 4.1h2l1.5 1.5 1.5-1.5h.5m-5 4.1h.5l1.5-1.5 1.5 1.5h1.5"
+              stroke="#737B86"
+              strokeWidth="1.15"
+            />
+            {/* Polished slider, pull ring, and pull tab */}
+            <rect x="26" y="31" width="12" height="8.5" rx="2.4" fill="url(#archive-zipper-metal)" stroke="#747B86" strokeWidth="1" />
+            <path d="M28.5 33h7m-7 1.5h7" stroke="#FFFFFF" strokeOpacity=".8" strokeWidth=".8" />
+            <path d="M32 39.5v2.2" stroke="#606873" strokeWidth="1.2" />
+            <path d="M32 41.5c-2.3 0-3.5 1.1-3.5 2.6 0 1.4 1.2 2.3 3.5 2.3s3.5-.9 3.5-2.3c0-1.5-1.2-2.6-3.5-2.6Z" fill="#DCE1E7" stroke="#737B86" strokeWidth="1" />
+            <path d="M32 43v1.7" stroke="#858C96" strokeWidth=".9" />
+            <text x="32" y="54.2" textAnchor="middle" fill="#69717C" fontSize="5.7" fontWeight="700" letterSpacing="1.1" fontFamily="-apple-system, BlinkMacSystemFont, sans-serif">
+              {archiveLabel}
+            </text>
           </g>
         ) : (
-          <text
-            x="32"
-            y="49"
-            textAnchor="middle"
-            fill="white"
-            fontSize="7.5"
-            fontWeight="700"
-            fontFamily="-apple-system, BlinkMacSystemFont, sans-serif"
-          >
-            {badgeText}
-          </text>
+          <>
+            {/* Subtle document lines */}
+            <rect x="20" y="23" width="18" height="2.4" rx="1.2" fill="#CBD5E1" />
+            <rect x="20" y="28.5" width="24" height="2.4" rx="1.2" fill="#CBD5E1" />
+            <rect x="20" y="34" width="15" height="2.4" rx="1.2" fill="#CBD5E1" />
+            {/* Colored extension badge */}
+            <rect x="17" y="41" width="30" height="11" rx="3.5" fill={badgeColor} />
+            <text
+              x="32"
+              y="49"
+              textAnchor="middle"
+              fill="white"
+              fontSize="7.5"
+              fontWeight="700"
+              fontFamily="-apple-system, BlinkMacSystemFont, sans-serif"
+            >
+              {badgeText}
+            </text>
+          </>
         )}
       </svg>
 

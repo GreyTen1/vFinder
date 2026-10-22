@@ -2778,6 +2778,36 @@ pub async fn get_file_info(path: String) -> Result<FileEntry, String> {
 }
 
 #[tauri::command]
+pub async fn set_file_executable(path: String, executable: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let item_path = Path::new(&path);
+        let metadata = fs::symlink_metadata(item_path)
+            .map_err(|error| format!("Could not read file permissions: {error}"))?;
+        if metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("Executable permission can only be changed for regular files".to_string());
+        }
+        if !metadata.is_file() {
+            return Err("Executable permission can only be changed for regular files".to_string());
+        }
+
+        let current_mode = metadata.permissions().mode();
+        let updated_mode = if executable {
+            current_mode | 0o111
+        } else {
+            current_mode & !0o111
+        };
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(updated_mode);
+        fs::set_permissions(item_path, permissions)
+            .map_err(|error| format!("Could not change executable permission: {error}"))?;
+        bump_cache_version();
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn set_webview_zoom(window: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
     window.set_zoom(scale).map_err(|e| e.to_string())
 }
