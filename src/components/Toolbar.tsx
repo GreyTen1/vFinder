@@ -171,7 +171,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   const tabDragRef = useRef<TabDragState | null>(null);
   const tabElementsRef = useRef(new Map<string, HTMLDivElement>());
   const splitTabElementRef = useRef<HTMLDivElement>(null);
-  const tabMoveOverlayRef = useRef<HTMLDivElement>(null);
   const animatedTabMoveRef = useRef<typeof tabMoveAnimation>(null);
   const pendingTabPositionsRef = useRef<Map<string, number> | null>(null);
   const suppressTabClickRef = useRef(false);
@@ -186,8 +185,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     tab: FinderTab;
     left: number;
     top: number;
-    width: number;
-    height: number;
   } | null>(null);
 
   useLayoutEffect(() => {
@@ -224,23 +221,32 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       return;
     }
     const target = splitTabElementRef.current;
-    const overlay = tabMoveOverlayRef.current;
-    if (!target || !overlay) return;
+    if (!target) return;
 
     const targetRect = target.getBoundingClientRect();
     animatedTabMoveRef.current = moving;
-    const deltaX = targetRect.left - moving.left;
-    const deltaY = targetRect.top - moving.top;
-    const animation = overlay.animate(
+    const deltaX = moving.left - targetRect.left;
+    const deltaY = moving.top - targetRect.top;
+    const animation = target.animate(
       [
-        { transform: "translate(0, 0) scale(1, 1)" },
-        {
-          transform: `translate(${deltaX}px, ${deltaY}px) scale(${targetRect.width / moving.width}, ${targetRect.height / moving.height})`,
-        },
+        { transform: `translate(${deltaX}px, ${deltaY}px)` },
+        { transform: "translate(0, 0)" },
       ],
-      { duration: 320, easing: "cubic-bezier(0.2, 0.75, 0.25, 1)" }
+      {
+        duration: 320,
+        easing: "cubic-bezier(0.2, 0.75, 0.25, 1)",
+        fill: "forwards",
+      }
     );
     animation.onfinish = () => {
+      // Commit the identity transform before dropping the animation effect.
+      // The destination node remains mounted, so there is no overlay handoff.
+      try {
+        animation.commitStyles();
+      } catch {
+        // Older WebKit versions may not implement commitStyles.
+      }
+      animation.cancel();
       animatedTabMoveRef.current = null;
       setTabMoveAnimation((current) => (current === moving ? null : current));
     };
@@ -342,8 +348,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         tab,
         left: rect.left,
         top: rect.top,
-        width: rect.width,
-        height: rect.height,
       });
     }
     onSplitTab(tab);
@@ -1109,7 +1113,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                     ? "border-[#807bc0]/30 border-b-0 bg-[#efedf8] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
                     : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
               }`}
-              style={{ opacity: tabMoveAnimation?.tab.id === splitTab.id ? 0 : undefined }}
               role="tab"
               aria-selected="true"
               title={splitTab.title}
@@ -1137,31 +1140,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </div>
             );
           })()
-        )}
-        {tabMoveAnimation && (
-          <div
-            ref={tabMoveOverlayRef}
-            aria-hidden="true"
-            className={`workspace-tab-active ${darkMode ? "workspace-tab-active-dark" : "workspace-tab-active-light"} pointer-events-none fixed z-[10000] flex h-8 max-w-[220px] items-center gap-2 rounded-t-xl rounded-b-none border pl-3 pr-2 text-[11px] font-medium shadow-lg ${
-              darkMode
-                ? "border-white/10 border-b-0 bg-[#202024] text-white"
-                : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900"
-            }`}
-            style={{
-              left: tabMoveAnimation.left,
-              top: tabMoveAnimation.top,
-              width: tabMoveAnimation.width,
-              height: tabMoveAnimation.height,
-              transformOrigin: "top left",
-            }}
-          >
-            <Folder className="h-3.5 w-3.5 shrink-0 text-[#0a84ff]" />
-            <span className="min-w-0 flex-1 truncate">{tabMoveAnimation.tab.title}</span>
-            <span aria-hidden="true" className="h-5 w-5 shrink-0" />
-            <span className="shrink-0 p-1 opacity-60">
-              <X className="h-3 w-3" />
-            </span>
-          </div>
         )}
       </div>
     </div>

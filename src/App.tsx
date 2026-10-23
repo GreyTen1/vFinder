@@ -250,6 +250,7 @@ export const App: React.FC = () => {
   const appShellRef = useRef<HTMLDivElement>(null);
   const primaryPaneRef = useRef<HTMLDivElement>(null);
   const splitContentRef = useRef<HTMLDivElement>(null);
+  const previousSplitContentWidthRef = useRef<number | null>(null);
   const [splitTabLeft, setSplitTabLeft] = useState<number | null>(null);
   const [splitPaneRatio, setSplitPaneRatio] = useState(0.5);
   const [splitPaneRefreshVersion, setSplitPaneRefreshVersion] = useState(0);
@@ -279,8 +280,26 @@ export const App: React.FC = () => {
   useLayoutEffect(() => {
     if (!splitPane) {
       setSplitTabLeft(null);
+      previousSplitContentWidthRef.current = null;
       return;
     }
+
+    const content = splitContentRef.current;
+    if (!content) return;
+    const currentWidth = content.getBoundingClientRect().width;
+    const previousWidth = previousSplitContentWidthRef.current;
+    if (previousWidth !== null && Math.abs(previousWidth - currentWidth) > 1) {
+      // Keep the right pane's pixel width when the sidebar changes the
+      // workspace origin/width, which keeps its tab aligned on screen.
+      const rightWidth = previousWidth * splitPaneRatio;
+      const minRatio = Math.min(0.5, 280 / currentWidth);
+      const nextRatio = Math.max(
+        minRatio,
+        Math.min(1 - minRatio, rightWidth / currentWidth)
+      );
+      setSplitPaneRatio(nextRatio);
+    }
+    previousSplitContentWidthRef.current = currentWidth;
 
     const updateSplitTabAlignment = () => {
       const shell = appShellRef.current;
@@ -299,12 +318,18 @@ export const App: React.FC = () => {
     const observer = new ResizeObserver(updateSplitTabAlignment);
     if (appShellRef.current) observer.observe(appShellRef.current);
     if (primaryPaneRef.current) observer.observe(primaryPaneRef.current);
+    const contentObserver = new ResizeObserver(() => {
+      const width = splitContentRef.current?.getBoundingClientRect().width;
+      if (width && width > 0) previousSplitContentWidthRef.current = width;
+    });
+    contentObserver.observe(content);
     window.addEventListener("resize", updateSplitTabAlignment);
     return () => {
       observer.disconnect();
+      contentObserver.disconnect();
       window.removeEventListener("resize", updateSplitTabAlignment);
     };
-  }, [Boolean(splitPane), sidebarLayoutOpen]);
+  }, [Boolean(splitPane), sidebarLayoutOpen, splitPaneRatio]);
 
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
