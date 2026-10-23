@@ -681,6 +681,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         {/* Right Section: Quick New Folder, Sort, Action Menu, Downloads, Search */}
         <div
           ref={rightToolbarRef}
+          data-tauri-drag-region
           className={`flex-1 flex items-center min-w-0 justify-end pointer-events-auto max-w-full max-[999px]:flex-none max-[999px]:max-w-[55%] ${vscodeControlsOnRight ? "gap-1" : "gap-1.5"}`}
         >
           {/* Quick New Folder button */}
