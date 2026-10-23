@@ -1,6 +1,6 @@
 # vFinder #
 
-macOS' file exlorer, but for linux
+macOS' file explorer, but for linux
 
 ![vFinder_logo](https://github.com/GreyTen1/vFinder/blob/main/src-tauri/icons/Square142x142Logo.png)
 
