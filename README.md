@@ -28,6 +28,11 @@ Altough It's way far from perfect right now, I believe it can be a usable daily 
 
 ## Compatible distros ##
 
+There's an appImage that bundles necessary libraries.
+
+Also, dependencies are handled automatically if installed using the correct release according to your distro (.deb, .rpm, .pkg).
+But if you want to know a bit more about what's being installed on your device, there's a list below so you can check!
+
 Ubuntu (26.04 LTS, 25.04 LTS, 24,04 LTS) 
 
 Dependencies:
