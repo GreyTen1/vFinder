@@ -57,7 +57,7 @@ pub async fn open_detached_tab_window(
         &label,
         tauri::WebviewUrl::App(PathBuf::from(app_path)),
     )
-    .title("vFinder")
+    .title(if is_root_session() { "vFinder (Root)" } else { "vFinder" })
     .inner_size(1160.0, 740.0)
     .min_inner_size(760.0, 480.0)
     .decorations(false)
@@ -436,6 +436,46 @@ pub fn list_system_partitions() -> Vec<VolumeInfo> {
     volumes
 }
 
+pub fn is_root_session() -> bool {
+    crate::is_effective_root()
+}
+
+pub fn effective_user_home_dir() -> PathBuf {
+    if let Ok(orig) = std::env::var("VFINDER_ORIGINAL_HOME") {
+        let p = PathBuf::from(orig.trim());
+        if !orig.trim().is_empty() && p.exists() {
+            return p;
+        }
+    }
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        let trimmed = sudo_user.trim();
+        if !trimmed.is_empty() && trimmed != "root" {
+            let candidate = PathBuf::from(format!("/home/{trimmed}"));
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
+pub fn effective_user_subdir(dir_fn: fn() -> Option<PathBuf>, fallback_name: &str) -> Option<PathBuf> {
+    if is_root_session() {
+        let candidate = effective_user_home_dir().join(fallback_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    dir_fn().or_else(|| {
+        let candidate = effective_user_home_dir().join(fallback_name);
+        if candidate.exists() {
+            Some(candidate)
+        } else {
+            None
+        }
+    })
+}
+
 static SUDO_SESSION_PASS: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn get_cached_sudo_password() -> Option<String> {
@@ -458,6 +498,26 @@ fn set_cached_sudo_password(pwd: Option<String>) {
 fn run_sudo_command(password: &str, args: &[&str]) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
+
+    if is_root_session() {
+        if args.is_empty() || args[0].starts_with('-') {
+            return Ok(());
+        }
+        let output = Command::new(args[0])
+            .env("LC_ALL", "C")
+            .args(&args[1..])
+            .output()
+            .map_err(|e| format!("Failed to run {}: {}", args[0], e))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Command failed".to_string()
+        } else {
+            stderr
+        });
+    }
 
     let mut child = Command::new("sudo")
         .env("LC_ALL", "C")
@@ -501,9 +561,62 @@ fn run_sudo_command(password: &str, args: &[&str]) -> Result<(), String> {
 }
 
 fn validate_sudo_password(password: &str) -> Result<(), String> {
+    if is_root_session() {
+        return Ok(());
+    }
     run_sudo_command(password, &["-k", "-v"])?;
     set_cached_sudo_password(Some(password.to_string()));
     Ok(())
+}
+
+#[tauri::command]
+pub async fn elevate_to_root_session(
+    window: tauri::WebviewWindow,
+    password: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_sudo_password(&password)?;
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::process::Stdio;
+
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("Could not resolve binary path: {e}"))?;
+            let env_pairs = crate::build_sudo_env_pairs();
+            let mut orig_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            if !orig_args.iter().any(|a| a == "--sudo") {
+                orig_args.push(std::ffi::OsString::from("--sudo"));
+            }
+
+            let mut child = Command::new("sudo")
+                .env("LC_ALL", "C")
+                .arg("-S")
+                .arg("-p")
+                .arg("")
+                .arg("env")
+                .args(&env_pairs)
+                .arg(&exe)
+                .args(&orig_args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn elevated vFinder: {e}"))?;
+
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(format!("{password}\n").as_bytes());
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = window.close();
+            std::process::exit(0);
+        }
+        #[cfg(not(unix))]
+        Err("Root elevation is only supported on Unix systems".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn find_exfat_fuse_binary() -> Option<String> {
@@ -535,6 +648,20 @@ fn find_exfat_fuse_binary() -> Option<String> {
 }
 
 fn current_uid_gid_user() -> (String, String, String) {
+    if let (Ok(orig_uid), Ok(orig_gid), Ok(orig_user)) = (
+        std::env::var("VFINDER_ORIGINAL_UID").or_else(|_| std::env::var("SUDO_UID")),
+        std::env::var("VFINDER_ORIGINAL_GID").or_else(|_| std::env::var("SUDO_GID")),
+        std::env::var("VFINDER_ORIGINAL_USER").or_else(|_| std::env::var("SUDO_USER")),
+    ) {
+        if !orig_uid.trim().is_empty() && !orig_user.trim().is_empty() {
+            return (
+                orig_uid.trim().to_string(),
+                orig_gid.trim().to_string(),
+                orig_user.trim().to_string(),
+            );
+        }
+    }
+
     let uid = Command::new("id")
         .arg("-u")
         .output()
@@ -597,7 +724,9 @@ pub async fn mount_partition(
                         }
                     }
                 }
-                if let Some(cached) = get_cached_sudo_password() {
+                if is_root_session() {
+                    String::new()
+                } else if let Some(cached) = get_cached_sudo_password() {
                     cached
                 } else {
                     return Err("AUTH_REQUIRED".to_string());
@@ -727,7 +856,9 @@ pub async fn unmount_partition(
                         return Ok(());
                     }
                 }
-                if let Some(cached) = get_cached_sudo_password() {
+                if is_root_session() {
+                    String::new()
+                } else if let Some(cached) = get_cached_sudo_password() {
                     cached
                 } else {
                     return Err("AUTH_REQUIRED".to_string());
@@ -838,7 +969,9 @@ pub async fn format_partition(
         let effective_password = match password {
             Some(p) if !p.is_empty() => p,
             _ => {
-                if let Some(cached) = get_cached_sudo_password() {
+                if is_root_session() {
+                    String::new()
+                } else if let Some(cached) = get_cached_sudo_password() {
                     cached
                 } else {
                     return Err("AUTH_REQUIRED".to_string());
@@ -948,7 +1081,9 @@ pub async fn check_partition(
         let effective_password = match password {
             Some(p) if !p.is_empty() => p,
             _ => {
-                if let Some(cached) = get_cached_sudo_password() {
+                if is_root_session() {
+                    String::new()
+                } else if let Some(cached) = get_cached_sudo_password() {
                     cached
                 } else {
                     return Err("AUTH_REQUIRED".to_string());
@@ -977,26 +1112,34 @@ pub async fn check_partition(
         use std::io::Write;
         use std::process::Stdio;
 
-        let mut child = Command::new("sudo")
-            .env("LC_ALL", "C")
-            .arg("-S")
-            .arg("-p")
-            .arg("")
-            .arg(prog)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to run check tool {}: {}", prog, e))?;
+        let output = if is_root_session() {
+            Command::new(prog)
+                .env("LC_ALL", "C")
+                .args(&args)
+                .output()
+                .map_err(|e| format!("Failed to run check tool {}: {}", prog, e))?
+        } else {
+            let mut child = Command::new("sudo")
+                .env("LC_ALL", "C")
+                .arg("-S")
+                .arg("-p")
+                .arg("")
+                .arg(prog)
+                .args(&args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to run check tool {}: {}", prog, e))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(format!("{}\n", effective_password).as_bytes());
-        }
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(format!("{}\n", effective_password).as_bytes());
+            }
 
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("Failed waiting for check tool: {}", e))?;
+            child
+                .wait_with_output()
+                .map_err(|e| format!("Failed waiting for check tool: {}", e))?
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1368,6 +1511,7 @@ pub fn build_file_entry_with_cfg(
     } else {
         resolve_default_app(&path_str, &extension, open_cfg)
     };
+    let (original_path, deleted_at) = resolve_trash_metadata_for_path(path);
 
     Some(FileEntry {
         name,
@@ -1376,7 +1520,7 @@ pub fn build_file_entry_with_cfg(
         is_symlink,
         is_hidden,
         size,
-        modified,
+        modified: deleted_at.unwrap_or(modified),
         created,
         extension,
         kind,
@@ -1386,6 +1530,8 @@ pub fn build_file_entry_with_cfg(
         child_count,
         tags,
         default_app,
+        original_path,
+        deleted_at,
     })
 }
 
@@ -1460,6 +1606,7 @@ pub fn build_file_entry_from_dir_entry(
     } else {
         resolve_default_app(&path_str, &extension, open_cfg)
     };
+    let (original_path, deleted_at) = resolve_trash_metadata_for_path(&path);
 
     Some(FileEntry {
         name,
@@ -1468,7 +1615,7 @@ pub fn build_file_entry_from_dir_entry(
         is_symlink,
         is_hidden,
         size,
-        modified,
+        modified: deleted_at.unwrap_or(modified),
         created,
         extension,
         kind,
@@ -1478,6 +1625,8 @@ pub fn build_file_entry_from_dir_entry(
         child_count,
         tags,
         default_app,
+        original_path,
+        deleted_at,
     })
 }
 
@@ -1485,7 +1634,10 @@ fn read_directory_sync(path: String, show_hidden: bool) -> Result<Vec<FileEntry>
     if path == "__RECENTS__" {
         return get_recent_files_sync(show_hidden);
     }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    if path == "__TRASH__" {
+        return get_trash_files_sync(show_hidden);
+    }
+    let home = effective_user_home_dir();
     let resolved_path = if path.is_empty() || path == "~" {
         home
     } else if let Some(stripped) = path.strip_prefix("~/") {
@@ -1596,24 +1748,25 @@ pub async fn prefetch_directories(
 #[tauri::command]
 pub async fn get_sidebar_data() -> Result<SidebarData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let home = effective_user_home_dir();
         let home_str = home.to_string_lossy().to_string();
 
         let mut favorites = Vec::new();
         let standard_dirs = [
             ("recents", "Recents", Some(PathBuf::from("__RECENTS__")), "clock"),
             ("home", "Home", Some(home.clone()), "home"),
-            ("desktop", "Desktop", dirs::desktop_dir(), "monitor"),
-            ("documents", "Documents", dirs::document_dir(), "file-text"),
-            ("downloads", "Downloads", dirs::download_dir(), "download"),
-            ("pictures", "Pictures", dirs::picture_dir(), "image"),
-            ("music", "Music", dirs::audio_dir(), "music"),
-            ("videos", "Movies", dirs::video_dir(), "film"),
+            ("desktop", "Desktop", effective_user_subdir(dirs::desktop_dir, "Desktop"), "monitor"),
+            ("documents", "Documents", effective_user_subdir(dirs::document_dir, "Documents"), "file-text"),
+            ("downloads", "Downloads", effective_user_subdir(dirs::download_dir, "Downloads"), "download"),
+            ("pictures", "Pictures", effective_user_subdir(dirs::picture_dir, "Pictures"), "image"),
+            ("music", "Music", effective_user_subdir(dirs::audio_dir, "Music"), "music"),
+            ("videos", "Movies", effective_user_subdir(dirs::video_dir, "Videos"), "film"),
+            ("trash", "Trash", Some(PathBuf::from("__TRASH__")), "trash"),
         ];
 
         for (id, label, dir_opt, icon) in standard_dirs {
             if let Some(p) = dir_opt {
-                if id == "recents" || p.exists() {
+                if id == "recents" || id == "trash" || p.exists() {
                     favorites.push(UserDirectory {
                         id: id.to_string(),
                         name: label.to_string(),
@@ -1630,6 +1783,8 @@ pub async fn get_sidebar_data() -> Result<SidebarData, String> {
         Ok(SidebarData {
             home_dir: home_str,
             os_name: get_system_os_name(),
+            is_root: is_root_session(),
+            needs_sudo_elevation: crate::needs_gui_sudo_elevation(),
             favorites,
             volumes,
             tags,
@@ -2193,19 +2348,398 @@ fn open_tarball_reader(path: &Path) -> Result<Box<dyn Read>, String> {
     }
 }
 
+fn active_trash_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let user_trash = effective_user_home_dir().join(".local/share/Trash");
+    roots.push(user_trash);
+
+    if let Some(data_local) = dirs::data_local_dir() {
+        let alt_trash = data_local.join("Trash");
+        if !roots.contains(&alt_trash) {
+            roots.push(alt_trash);
+        }
+    }
+    if is_root_session() {
+        let root_trash = PathBuf::from("/root/.local/share/Trash");
+        if !roots.contains(&root_trash) {
+            roots.push(root_trash);
+        }
+    }
+    roots
+}
+
+fn decode_trash_uri_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn encode_trash_uri_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn parse_trashinfo_file(info_path: &Path) -> (Option<String>, Option<i64>) {
+    let Ok(content) = fs::read_to_string(info_path) else {
+        return (None, None);
+    };
+    let mut orig_path = None;
+    let mut deleted_at = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Path=") {
+            let decoded = decode_trash_uri_path(rest.trim());
+            if !decoded.is_empty() {
+                orig_path = Some(decoded);
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("DeletionDate=") {
+            if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(rest.trim(), "%Y-%m-%dT%H:%M:%S") {
+                use chrono::TimeZone;
+                let ts = chrono::Local
+                    .from_local_datetime(&naive)
+                    .single()
+                    .map(|dt| dt.timestamp())
+                    .unwrap_or_else(|| naive.and_utc().timestamp());
+                deleted_at = Some(ts);
+            }
+        }
+    }
+    (orig_path, deleted_at)
+}
+
+fn resolve_trash_metadata_for_path(path: &Path) -> (Option<String>, Option<i64>) {
+    let Some(parent) = path.parent() else {
+        return (None, None);
+    };
+    if parent.file_name().and_then(|n| n.to_str()) != Some("files") {
+        return (None, None);
+    }
+    let Some(trash_root) = parent.parent() else {
+        return (None, None);
+    };
+    let Some(file_name) = path.file_name() else {
+        return (None, None);
+    };
+    let info_path = trash_root
+        .join("info")
+        .join(format!("{}.trashinfo", file_name.to_string_lossy()));
+    if !info_path.exists() {
+        return (None, None);
+    }
+    parse_trashinfo_file(&info_path)
+}
+
+fn move_item_to_freedesktop_trash(src: &Path) -> Result<(), String> {
+    if !src.exists() && fs::symlink_metadata(src).is_err() {
+        return Err(format!("Item does not exist: {}", src.display()));
+    }
+    let abs_src = src.canonicalize().unwrap_or_else(|_| src.to_path_buf());
+    let trash_root = effective_user_home_dir().join(".local/share/Trash");
+    let files_dir = trash_root.join("files");
+    let info_dir = trash_root.join("info");
+    fs::create_dir_all(&files_dir).map_err(|e| format!("Could not create Trash/files: {e}"))?;
+    fs::create_dir_all(&info_dir).map_err(|e| format!("Could not create Trash/info: {e}"))?;
+
+    let orig_name = src
+        .file_name()
+        .ok_or_else(|| "Invalid filename".to_string())?
+        .to_string_lossy()
+        .to_string();
+    let stem = Path::new(&orig_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| orig_name.clone());
+    let ext = Path::new(&orig_name)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    let mut trash_name = orig_name.clone();
+    for i in 2..10000 {
+        let candidate_file = files_dir.join(&trash_name);
+        let candidate_info = info_dir.join(format!("{trash_name}.trashinfo"));
+        if !candidate_file.exists() && !candidate_info.exists() {
+            break;
+        }
+        trash_name = format!("{stem}.{i}{ext}");
+    }
+
+    let target_file = files_dir.join(&trash_name);
+    let target_info = info_dir.join(format!("{trash_name}.trashinfo"));
+    let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let info_contents = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        encode_trash_uri_path(&abs_src.to_string_lossy()),
+        now_str
+    );
+    fs::write(&target_info, info_contents)
+        .map_err(|e| format!("Could not write .trashinfo: {e}"))?;
+
+    if fs::rename(src, &target_file).is_err() {
+        let meta = fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            if let Err(err) = copy_dir_recursive(src, &target_file) {
+                let _ = fs::remove_file(&target_info);
+                return Err(err);
+            }
+            if let Err(err) = fs::remove_dir_all(src) {
+                return Err(err.to_string());
+            }
+        } else {
+            if let Err(err) = fs::copy(src, &target_file) {
+                let _ = fs::remove_file(&target_info);
+                return Err(err.to_string());
+            }
+            if let Err(err) = fs::remove_file(src) {
+                return Err(err.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_permanently_with_trashinfo(target: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(target)
+        .map_err(|e| format!("Could not access {}: {e}", target.display()))?;
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        fs::remove_dir_all(target)
+            .map_err(|e| format!("Failed to delete folder {}: {e}", target.display()))?;
+    } else {
+        fs::remove_file(target)
+            .map_err(|e| format!("Failed to delete file {}: {e}", target.display()))?;
+    }
+
+    if let Some(parent) = target.parent() {
+        if parent.file_name().and_then(|n| n.to_str()) == Some("files") {
+            if let (Some(trash_root), Some(file_name)) = (parent.parent(), target.file_name()) {
+                let info_path = trash_root
+                    .join("info")
+                    .join(format!("{}.trashinfo", file_name.to_string_lossy()));
+                let _ = fs::remove_file(info_path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn get_trash_files_sync(show_hidden: bool) -> Result<Vec<FileEntry>, String> {
+    let tags_map = load_tags_map();
+    let open_cfg = load_open_with_config();
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for trash_root in active_trash_roots() {
+        let files_dir = trash_root.join("files");
+        if !files_dir.is_dir() {
+            continue;
+        }
+        if let Ok(read_dir) = fs::read_dir(&files_dir) {
+            for item in read_dir.flatten() {
+                let file_name = item.file_name();
+                let name_str = file_name.to_string_lossy();
+                if !show_hidden && name_str.starts_with('.') {
+                    continue;
+                }
+                let p = item.path();
+                let p_str = p.to_string_lossy().to_string();
+                if seen.contains(&p_str) {
+                    continue;
+                }
+                seen.insert(p_str);
+                if let Some(entry) = build_file_entry_from_dir_entry(&item, &tags_map, &open_cfg) {
+                    entries.push(entry);
+                }
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        let a_time = a.deleted_at.unwrap_or(a.modified);
+        let b_time = b.deleted_at.unwrap_or(b.modified);
+        b_time.cmp(&a_time)
+    });
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn get_trash_files(show_hidden: bool) -> Result<Vec<FileEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || get_trash_files_sync(show_hidden))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn restore_trash_items(paths: Vec<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let targets: Vec<PathBuf> = if paths.is_empty() {
+            get_trash_files_sync(true)?
+                .into_iter()
+                .map(|e| PathBuf::from(e.path))
+                .collect()
+        } else {
+            paths.into_iter().map(PathBuf::from).collect()
+        };
+
+        let mut restored = Vec::new();
+        let home = effective_user_home_dir();
+
+        for trash_path in targets {
+            if !trash_path.exists() && fs::symlink_metadata(&trash_path).is_err() {
+                continue;
+            }
+            let file_name = trash_path
+                .file_name()
+                .ok_or_else(|| "Invalid trash item name".to_string())?
+                .to_string_lossy()
+                .to_string();
+
+            let (orig_opt, _) = resolve_trash_metadata_for_path(&trash_path);
+            let desired_dest = orig_opt
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(&file_name));
+
+            let dest_parent = desired_dest
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| home.clone());
+            fs::create_dir_all(&dest_parent)
+                .map_err(|e| format!("Could not create folder {}: {e}", dest_parent.display()))?;
+
+            let dest_name = desired_dest
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| file_name.clone());
+            let final_dest = unique_destination_path(&dest_parent, &dest_name);
+
+            if fs::rename(&trash_path, &final_dest).is_err() {
+                let meta = fs::symlink_metadata(&trash_path).map_err(|e| e.to_string())?;
+                if meta.is_dir() && !meta.file_type().is_symlink() {
+                    copy_dir_recursive(&trash_path, &final_dest)?;
+                    fs::remove_dir_all(&trash_path).map_err(|e| e.to_string())?;
+                } else {
+                    fs::copy(&trash_path, &final_dest).map_err(|e| e.to_string())?;
+                    fs::remove_file(&trash_path).map_err(|e| e.to_string())?;
+                }
+            }
+
+            if let Some(parent) = trash_path.parent() {
+                if parent.file_name().and_then(|n| n.to_str()) == Some("files") {
+                    if let Some(trash_root) = parent.parent() {
+                        let info_path = trash_root
+                            .join("info")
+                            .join(format!("{file_name}.trashinfo"));
+                        let _ = fs::remove_file(info_path);
+                    }
+                }
+            }
+
+            restored.push(final_dest.to_string_lossy().to_string());
+        }
+
+        bump_cache_version();
+        Ok(restored)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn delete_trash_items_permanently(paths: Vec<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut count = 0usize;
+        for p in paths {
+            let target = Path::new(&p);
+            if target.exists() || fs::symlink_metadata(target).is_ok() {
+                remove_permanently_with_trashinfo(target)?;
+                count += 1;
+            }
+        }
+        bump_cache_version();
+        Ok(count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn empty_trash() -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut count = 0usize;
+        for trash_root in active_trash_roots() {
+            let files_dir = trash_root.join("files");
+            if files_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&files_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if remove_permanently_with_trashinfo(&p).is_ok() {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            let info_dir = trash_root.join("info");
+            if info_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&info_dir) {
+                    for entry in entries.flatten() {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+        bump_cache_version();
+        Ok(count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn trash_items(paths: Vec<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         for p in paths {
-            if let Err(err) = trash::delete(&p) {
-                let path = Path::new(&p);
-                if path.is_dir() {
-                    fs::remove_dir_all(path)
-                        .map_err(|e| format!("Trash error ({}): {}", err, e))?;
-                } else {
-                    fs::remove_file(path)
-                        .map_err(|e| format!("Trash error ({}): {}", err, e))?;
-                }
+            let path = Path::new(&p);
+            let already_in_trash = path
+                .parent()
+                .and_then(|parent| {
+                    if parent.file_name().and_then(|n| n.to_str()) == Some("files") {
+                        parent.parent()
+                    } else {
+                        None
+                    }
+                })
+                .map(|root| active_trash_roots().contains(&root.to_path_buf()))
+                .unwrap_or(false);
+
+            if already_in_trash {
+                remove_permanently_with_trashinfo(path)?;
+                continue;
+            }
+
+            if is_root_session() {
+                move_item_to_freedesktop_trash(path)?;
+            } else if trash::delete(&p).is_err() {
+                move_item_to_freedesktop_trash(path)?;
             }
         }
         bump_cache_version();
@@ -2455,7 +2989,7 @@ pub async fn search_directory(
         let open_cfg = load_open_with_config();
         let mut results = Vec::new();
         let mut queue = std::collections::VecDeque::new();
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let home = effective_user_home_dir();
         let root = if root_path.is_empty() || root_path == "~" {
             home
         } else if let Some(stripped) = root_path.strip_prefix("~/") {
@@ -2548,12 +3082,12 @@ pub async fn get_files_by_tag(tag_color: String) -> Result<Vec<FileEntry>, Strin
 }
 
 fn get_recent_files_sync(show_hidden: bool) -> Result<Vec<FileEntry>, String> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = effective_user_home_dir();
     let search_roots: Vec<PathBuf> = [
-        dirs::desktop_dir(),
-        dirs::document_dir(),
-        dirs::download_dir(),
-        dirs::picture_dir(),
+        effective_user_subdir(dirs::desktop_dir, "Desktop"),
+        effective_user_subdir(dirs::document_dir, "Documents"),
+        effective_user_subdir(dirs::download_dir, "Downloads"),
+        effective_user_subdir(dirs::picture_dir, "Pictures"),
         Some(home),
     ]
     .into_iter()

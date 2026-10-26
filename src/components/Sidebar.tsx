@@ -15,6 +15,7 @@ import {
   Usb,
   Disc,
   X,
+  Trash2,
 } from "lucide-react";
 import { SidebarData, TAG_COLORS, VolumeInfo, formatBytes } from "../types";
 
@@ -86,6 +87,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         return <Music className={cls} />;
       case "film":
         return <Film className={cls} />;
+      case "trash":
+        return <Trash2 className={cls} />;
       default:
         return <Folder className={cls} />;
     }
@@ -154,7 +157,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             {vol.isRemovable ? (
               <Usb
                 className={`w-4 h-4 shrink-0 ${
-                  vol.isMounted ? "text-amber-400" : "text-amber-400/80"
+                  vol.isMounted ? "text-[#0a84ff]" : "opacity-45"
                 }`}
               />
             ) : vol.isSystem ? (
@@ -394,8 +397,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <div className="mt-0.5 space-y-1">
             {removableVolumes.length > 0 && (
               <div className="space-y-1 mb-2">
-                <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-500/80 flex items-center gap-1.5">
-                  <Usb className="w-3 h-3 text-amber-400" />
+                <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider opacity-50 flex items-center gap-1.5">
+                  <Usb className="w-3 h-3 text-[#0a84ff]" />
                   <span>External / USB Drives ({removableVolumes.length})</span>
                 </div>
                 {removableVolumes.map(renderVolumeCard)}

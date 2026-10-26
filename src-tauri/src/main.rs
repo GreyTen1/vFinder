@@ -28,10 +28,395 @@ use tauri::{Emitter, Manager};
 use tauri::window::Color;
 
 static STARTUP_DIRECTORY: OnceLock<Option<String>> = OnceLock::new();
+static STARTUP_SELECTION: OnceLock<Option<String>> = OnceLock::new();
+static NEEDS_GUI_SUDO_ELEVATION: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+pub fn is_effective_root() -> bool {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn is_effective_root() -> bool {
+    false
+}
+
+pub fn needs_gui_sudo_elevation() -> bool {
+    NEEDS_GUI_SUDO_ELEVATION.load(Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+pub fn build_sudo_env_pairs() -> Vec<String> {
+    extern "C" {
+        fn geteuid() -> u32;
+        fn getegid() -> u32;
+    }
+    let uid = unsafe { geteuid() };
+    let gid = unsafe { getegid() };
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+
+    let mut pairs = vec![
+        "VFINDER_SUDO_SESSION=1".to_string(),
+        format!("VFINDER_ORIGINAL_UID={uid}"),
+        format!("VFINDER_ORIGINAL_GID={gid}"),
+        "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1".to_string(),
+        "WEBKIT_DISABLE_DMABUF_RENDERER=1".to_string(),
+        "WEBKIT_DISABLE_COMPOSITING_MODE=0".to_string(),
+    ];
+    if !user.is_empty() {
+        pairs.push(format!("VFINDER_ORIGINAL_USER={user}"));
+    }
+    if !home.is_empty() {
+        pairs.push(format!("VFINDER_ORIGINAL_HOME={home}"));
+    }
+    if !xdg_runtime.is_empty() {
+        pairs.push(format!("VFINDER_ORIGINAL_XDG_RUNTIME_DIR={xdg_runtime}"));
+    }
+
+    let preserved_keys = [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "GDK_BACKEND",
+        "GTK_THEME",
+        "XCURSOR_THEME",
+        "XCURSOR_SIZE",
+        "MOZ_ENABLE_WAYLAND",
+        "LANG",
+        "LC_ALL",
+        "VFINDER_WEBVIEW_DEBUG",
+    ];
+    for key in preserved_keys {
+        if let Ok(val) = std::env::var(key) {
+            if !val.is_empty() {
+                pairs.push(format!("{key}={val}"));
+            }
+        }
+    }
+    pairs
+}
+
+#[cfg(unix)]
+fn lookup_passwd_home(user_or_uid: &str) -> Option<String> {
+    let content = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in content.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 6 && (fields[0] == user_or_uid || fields[2] == user_or_uid) {
+            let dir = fields[5].trim();
+            if !dir.is_empty() {
+                return Some(dir.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn prepare_root_gui_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+
+    let orig_uid = std::env::var("VFINDER_ORIGINAL_UID")
+        .or_else(|_| std::env::var("SUDO_UID"))
+        .or_else(|_| std::env::var("PKEXEC_UID"))
+        .ok()
+        .filter(|s| !s.is_empty() && s != "0");
+
+    let orig_user = std::env::var("VFINDER_ORIGINAL_USER")
+        .or_else(|_| std::env::var("SUDO_USER"))
+        .ok()
+        .filter(|s| !s.is_empty() && s != "root");
+
+    if std::env::var_os("VFINDER_ORIGINAL_HOME").is_none() {
+        let resolved_home = orig_user
+            .as_deref()
+            .and_then(lookup_passwd_home)
+            .or_else(|| orig_uid.as_deref().and_then(lookup_passwd_home));
+        if let Some(home) = resolved_home {
+            std::env::set_var("VFINDER_ORIGINAL_HOME", &home);
+        }
+    }
+
+    let orig_runtime_dir = std::env::var("VFINDER_ORIGINAL_XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("XDG_RUNTIME_DIR")
+                .ok()
+                .filter(|s| !s.is_empty() && s != "/tmp/vfinder-runtime-root")
+        })
+        .or_else(|| orig_uid.as_ref().map(|uid| format!("/run/user/{uid}")));
+
+    if let Some(ref user_rt) = orig_runtime_dir {
+        let user_rt_path = std::path::Path::new(user_rt);
+        if user_rt_path.is_dir() {
+            if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+                if let Ok(entries) = std::fs::read_dir(user_rt_path) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.starts_with("wayland-") && !name.ends_with(".lock") {
+                            std::env::set_var("WAYLAND_DISPLAY", &name);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let root_rt = std::path::PathBuf::from("/tmp/vfinder-runtime-root");
+            let _ = std::fs::create_dir_all(&root_rt);
+            let _ = std::fs::set_permissions(&root_rt, std::fs::Permissions::from_mode(0o700));
+
+            if let Ok(entries) = std::fs::read_dir(user_rt_path) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("wayland-")
+                        || name_str.starts_with("pipewire-")
+                        || name_str == "pulse"
+                        || name_str == "bus"
+                    {
+                        let dst = root_rt.join(&name);
+                        let _ = std::fs::remove_file(&dst);
+                        let _ = std::os::unix::fs::symlink(entry.path(), &dst);
+                    }
+                }
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", &root_rt);
+        }
+    }
+
+    // Keep WebKitGTK / GTK root cache inside /root so root-owned files never pollute the user's home
+    if std::path::Path::new("/root").is_dir() {
+        std::env::set_var("XDG_CACHE_HOME", "/root/.cache");
+        std::env::set_var("XDG_DATA_HOME", "/root/.local/share");
+    }
+}
+
+#[cfg(unix)]
+fn handle_sudo_flag_and_root_env() {
+    extern "C" {
+        fn isatty(fd: i32) -> i32;
+    }
+    let wants_sudo = std::env::args().skip(1).any(|arg| arg == "--sudo");
+    if wants_sudo && !is_effective_root() {
+        let has_tty = unsafe { isatty(0) != 0 || isatty(1) != 0 || isatty(2) != 0 };
+        let sudo_cached = std::process::Command::new("sudo")
+            .args(["-n", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if has_tty || sudo_cached {
+            if let Ok(exe) = std::env::current_exe() {
+                use std::os::unix::process::CommandExt;
+                let env_pairs = build_sudo_env_pairs();
+                let orig_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+                eprintln!("[vFinder] Elevating session with root privileges (--sudo)...");
+                let err = std::process::Command::new("sudo")
+                    .arg("env")
+                    .args(&env_pairs)
+                    .arg(&exe)
+                    .args(&orig_args)
+                    .exec();
+                eprintln!("[vFinder] Failed to elevate with sudo: {err}");
+                std::process::exit(1);
+            }
+        } else {
+            NEEDS_GUI_SUDO_ELEVATION.store(true, Ordering::SeqCst);
+        }
+    }
+
+    if is_effective_root() {
+        prepare_root_gui_environment();
+    }
+}
+#[derive(Default)]
+struct FileManagerBridgeState {
+    frontend_ready: bool,
+    pending_requests: Vec<serde_json::Value>,
+}
+
+static FILE_MANAGER_BRIDGE: OnceLock<Mutex<FileManagerBridgeState>> = OnceLock::new();
+
+#[tauri::command]
+fn file_manager_frontend_ready() -> Vec<serde_json::Value> {
+    let bridge = FILE_MANAGER_BRIDGE.get_or_init(|| Mutex::new(FileManagerBridgeState::default()));
+    let Ok(mut state) = bridge.lock() else { return Vec::new() };
+    state.frontend_ready = true;
+    std::mem::take(&mut state.pending_requests)
+}
+
+#[tauri::command]
+fn take_file_manager_requests() -> Vec<serde_json::Value> {
+    let bridge = FILE_MANAGER_BRIDGE.get_or_init(|| Mutex::new(FileManagerBridgeState::default()));
+    let Ok(mut state) = bridge.lock() else { return Vec::new() };
+    std::mem::take(&mut state.pending_requests)
+}
+
+fn startup_argument_path(argument: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    let value = argument.to_string_lossy();
+    #[cfg(target_os = "linux")]
+    use gtk::gio::prelude::*;
+    #[cfg(target_os = "linux")]
+    let path = if value.starts_with("file://") {
+        gtk::gio::File::for_uri(&value).path()?
+    } else {
+        std::path::PathBuf::from(value.as_ref())
+    };
+    #[cfg(not(target_os = "linux"))]
+    let path = std::path::PathBuf::from(value.as_ref());
+    path.canonicalize().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn setup_file_manager_dbus(app: tauri::AppHandle) {
+    use gtk::gio;
+    use gtk::gio::prelude::*;
+
+    const INTERFACE_XML: &str = r#"
+      <node>
+        <interface name="org.freedesktop.FileManager1">
+          <method name="ShowItems">
+            <arg name="URIs" type="as" direction="in"/>
+            <arg name="StartupId" type="s" direction="in"/>
+          </method>
+          <method name="ShowFolders">
+            <arg name="URIs" type="as" direction="in"/>
+            <arg name="StartupId" type="s" direction="in"/>
+          </method>
+          <method name="ShowItemProperties">
+            <arg name="URIs" type="as" direction="in"/>
+            <arg name="StartupId" type="s" direction="in"/>
+          </method>
+        </interface>
+      </node>
+    "#;
+
+    let connection = match gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("[file-manager-dbus] Could not connect to session bus: {error}");
+            return;
+        }
+    };
+    let node = match gio::DBusNodeInfo::for_xml(INTERFACE_XML) {
+        Ok(node) => node,
+        Err(error) => {
+            eprintln!("[file-manager-dbus] Invalid interface description: {error}");
+            return;
+        }
+    };
+    let Some(interface) = node.interfaces().first() else {
+        eprintln!("[file-manager-dbus] Interface description is empty");
+        return;
+    };
+
+    let app_for_methods = app.clone();
+    if let Err(error) = connection.register_object(
+        "/org/freedesktop/FileManager1",
+        interface,
+        move |_connection, _sender, _object_path, _interface, method, parameters, invocation| {
+            let Some((uris, _startup_id)) = parameters.get::<(Vec<String>, String)>() else {
+                invocation.return_value(Some(&().to_variant()));
+                return;
+            };
+            let paths = uris
+                .iter()
+                .filter_map(|uri| gio::File::for_uri(uri).path())
+                .filter(|path| path.exists())
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+
+            if !paths.is_empty() {
+                let (directory, selected_paths) = match method {
+                    "ShowFolders" if std::path::Path::new(&paths[0]).is_file() => {
+                        let first = std::path::PathBuf::from(&paths[0]);
+                        let parent = first.parent().unwrap_or(first.as_path());
+                        (parent.to_string_lossy().into_owned(), vec![paths[0].clone()])
+                    }
+                    "ShowFolders" => (paths[0].clone(), Vec::new()),
+                    "ShowItems" | "ShowItemProperties" => {
+                        let first = std::path::PathBuf::from(&paths[0]);
+                        let parent = first.parent().unwrap_or(first.as_path());
+                        let parent = parent.to_string_lossy().into_owned();
+                        let selected = paths
+                            .into_iter()
+                            .filter(|path| {
+                                std::path::Path::new(path).parent()
+                                    == Some(std::path::Path::new(&parent))
+                            })
+                            .collect();
+                        (parent, selected)
+                    }
+                    _ => (String::new(), Vec::new()),
+                };
+
+                if !directory.is_empty() {
+                    if let Some(window) = app_for_methods.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                    let request = serde_json::json!({
+                        "directory": directory,
+                        "selectedPaths": selected_paths,
+                        "showProperties": method == "ShowItemProperties",
+                    });
+                    let bridge = FILE_MANAGER_BRIDGE
+                        .get_or_init(|| Mutex::new(FileManagerBridgeState::default()));
+                    let should_emit = if let Ok(mut state) = bridge.lock() {
+                        state.pending_requests.push(request);
+                        state.frontend_ready
+                    } else {
+                        false
+                    };
+                    if should_emit {
+                        let _ = app_for_methods.emit_to("main", "file-manager-show-items", ());
+                    }
+                }
+            }
+            invocation.return_value(Some(&().to_variant()));
+        },
+        |_connection, _sender, _object_path, _interface, _property| ().to_variant(),
+        |_connection, _sender, _object_path, _interface, _property, _value| false,
+    ) {
+        eprintln!("[file-manager-dbus] Could not register FileManager1: {error}");
+        return;
+    }
+
+    gio::bus_own_name_on_connection(
+        &connection,
+        "org.freedesktop.FileManager1",
+        gio::BusNameOwnerFlags::NONE,
+        |_connection, _name| println!("[file-manager-dbus] FileManager1 service registered"),
+        |_connection, _name| eprintln!("[file-manager-dbus] Could not own FileManager1 bus name"),
+    );
+}
 
 #[tauri::command]
 fn get_startup_directory() -> Option<String> {
     STARTUP_DIRECTORY.get().cloned().flatten()
+}
+
+#[tauri::command]
+fn get_startup_selection() -> Option<String> {
+    STARTUP_SELECTION.get().cloned().flatten()
 }
 
 static ARMED_DRAG_PATHS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
@@ -364,20 +749,40 @@ pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
 }
 
 fn main() {
-    let startup_directory = std::env::args_os()
+    #[cfg(unix)]
+    handle_sudo_flag_and_root_env();
+
+    let startup_target = std::env::args_os()
         .skip(1)
         .find(|arg| !arg.to_string_lossy().starts_with('-'))
-        .and_then(|arg| std::path::PathBuf::from(arg).canonicalize().ok())
-        .filter(|path| path.is_dir())
+        .and_then(|argument| startup_argument_path(&argument));
+    let startup_selection = startup_target
+        .as_ref()
+        .filter(|path| path.is_file())
         .map(|path| path.to_string_lossy().into_owned());
+    let startup_directory = startup_target.map(|path| {
+        if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(std::path::Path::new("/")).to_path_buf()
+        }
+    }).map(|path| path.to_string_lossy().into_owned());
     let _ = STARTUP_DIRECTORY.set(startup_directory);
+    let _ = STARTUP_SELECTION.set(startup_selection);
 
     tauri::Builder::default()
         .setup(|app| {
             #[cfg(target_os = "linux")]
             init_linux_app_icon();
+            #[cfg(target_os = "linux")]
+            if !is_effective_root() {
+                setup_file_manager_dbus(app.handle().clone());
+            }
             download_server::start_download_server(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
+                if is_effective_root() {
+                    let _ = window.set_title("vFinder (Root)");
+                }
                 if let Some(icon) = app.default_window_icon() {
                     let _ = window.set_icon(icon.clone());
                 }
@@ -400,7 +805,11 @@ fn main() {
             commands::read_directory,
             commands::prefetch_directories,
             commands::get_sidebar_data,
+            commands::elevate_to_root_session,
             get_startup_directory,
+            get_startup_selection,
+            file_manager_frontend_ready,
+            take_file_manager_requests,
             commands::mount_partition,
             commands::unmount_partition,
             commands::create_directory,
@@ -413,6 +822,10 @@ fn main() {
             commands::read_archive_contents,
             commands::extract_archive,
             commands::trash_items,
+            commands::get_trash_files,
+            commands::restore_trash_items,
+            commands::delete_trash_items_permanently,
+            commands::empty_trash,
             commands::open_item,
             commands::open_item_with,
             commands::set_default_app,

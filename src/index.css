@@ -129,32 +129,53 @@
 .workspace-tab-active::after {
   position: absolute;
   bottom: 0;
-  z-index: -1;
-  width: 8px;
-  height: 8px;
-  background: transparent;
+  z-index: 2;
+  width: 13px;
+  height: 13px;
   content: "";
   pointer-events: none;
 }
 
 .workspace-tab-active::before {
-  left: -8px;
-  border-bottom-right-radius: 8px;
-  box-shadow: 0 6px 0 0 var(--workspace-tab-surface);
+  left: -12px;
+  background: radial-gradient(
+    circle at 0 0,
+    transparent 10.6px,
+    var(--workspace-tab-border) 11px,
+    var(--workspace-tab-border) 11.75px,
+    var(--workspace-tab-surface) 12.15px
+  );
 }
 
 .workspace-tab-active::after {
-  right: -8px;
-  border-bottom-left-radius: 8px;
-  box-shadow: 0 6px 0 0 var(--workspace-tab-surface);
+  right: -12px;
+  background: radial-gradient(
+    circle at 100% 0,
+    transparent 10.6px,
+    var(--workspace-tab-border) 11px,
+    var(--workspace-tab-border) 11.75px,
+    var(--workspace-tab-surface) 12.15px
+  );
 }
 
 .workspace-tab-active-dark {
   --workspace-tab-surface: #202024;
+  --workspace-tab-border: #36363a;
 }
 
 .workspace-tab-active-light {
   --workspace-tab-surface: #f2f2f5;
+  --workspace-tab-border: #dadadd;
+}
+
+.workspace-tab-active-archive-dark {
+  --workspace-tab-surface: #29273a;
+  --workspace-tab-border: #4f4c71;
+}
+
+.workspace-tab-active-archive-light {
+  --workspace-tab-surface: #efedf8;
+  --workspace-tab-border: #cecbe7;
 }
 
 /* Resize the workspace once while the sidebar slides independently. */

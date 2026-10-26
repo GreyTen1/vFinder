@@ -10,12 +10,15 @@ export async function apiGetSidebarData(): Promise<SidebarData> {
     return {
       homeDir: "~",
       osName: "Linux",
+      isRoot: false,
+      needsSudoElevation: false,
       favorites: [
         { id: "recents", name: "Recents", path: "__RECENTS__", icon: "clock" },
         { id: "home", name: "Home", path: "~", icon: "home" },
         { id: "desktop", name: "Desktop", path: "~/Desktop", icon: "monitor" },
         { id: "documents", name: "Documents", path: "~/Documents", icon: "file-text" },
         { id: "downloads", name: "Downloads", path: "~/Downloads", icon: "download" },
+        { id: "trash", name: "Trash", path: "__TRASH__", icon: "trash" },
       ],
       volumes: [
         {
@@ -42,6 +45,34 @@ export async function apiGetSidebarData(): Promise<SidebarData> {
 export async function apiGetStartupDirectory(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string | null>("get_startup_directory");
+}
+
+export async function apiElevateToRootSession(password: string): Promise<void> {
+  if (!isTauri()) return;
+  return invoke<void>("elevate_to_root_session", { password });
+}
+
+export async function apiGetStartupSelection(): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string | null>("get_startup_selection");
+}
+
+export async function apiFileManagerFrontendReady(): Promise<Array<{
+  directory: string;
+  selectedPaths: string[];
+  showProperties?: boolean;
+}>> {
+  if (!isTauri()) return [];
+  return invoke("file_manager_frontend_ready");
+}
+
+export async function apiTakeFileManagerRequests(): Promise<Array<{
+  directory: string;
+  selectedPaths: string[];
+  showProperties?: boolean;
+}>> {
+  if (!isTauri()) return [];
+  return invoke("take_file_manager_requests");
 }
 
 export async function apiMountPartition(
@@ -71,6 +102,9 @@ export async function apiReadDirectory(
   if (path === "__RECENTS__") {
     return apiGetRecentFiles(showHidden);
   }
+  if (path === "__TRASH__") {
+    return apiGetTrashFiles(showHidden);
+  }
   if (!isTauri()) {
     return [];
   }
@@ -80,6 +114,26 @@ export async function apiReadDirectory(
 export async function apiGetRecentFiles(showHidden: boolean): Promise<FileEntry[]> {
   if (!isTauri()) return [];
   return invoke<FileEntry[]>("get_recent_files", { showHidden });
+}
+
+export async function apiGetTrashFiles(showHidden: boolean): Promise<FileEntry[]> {
+  if (!isTauri()) return [];
+  return invoke<FileEntry[]>("get_trash_files", { showHidden });
+}
+
+export async function apiRestoreTrashItems(paths: string[] = []): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invoke<string[]>("restore_trash_items", { paths });
+}
+
+export async function apiDeleteTrashItemsPermanently(paths: string[]): Promise<number> {
+  if (!isTauri()) return 0;
+  return invoke<number>("delete_trash_items_permanently", { paths });
+}
+
+export async function apiEmptyTrash(): Promise<number> {
+  if (!isTauri()) return 0;
+  return invoke<number>("empty_trash");
 }
 
 export async function apiPrefetchDirectories(

@@ -111,7 +111,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
     setHistoryIndex((prev) => Math.min(history.length - 1, prev + 1));
 
   const goUp = () => {
-    if (!location.path || location.path === "/" || location.path === "__RECENTS__") {
+    if (!location.path || location.path === "/" || location.path === "__RECENTS__" || location.path === "__TRASH__") {
       return;
     }
     const parts = location.path.split("/").filter(Boolean);
@@ -252,11 +252,11 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
           </button>
           <button
             type="button"
-            disabled={!location.path || location.path === "/" || location.path === "__RECENTS__"}
+            disabled={!location.path || location.path === "/" || location.path === "__RECENTS__" || location.path === "__TRASH__"}
             onClick={goUp}
             aria-label="Go to parent folder in split pane"
             title="Enclosing Folder"
-            className={`rounded-md p-1.5 transition ${location.path && location.path !== "/" && location.path !== "__RECENTS__" ? buttonClass : "cursor-default opacity-30"}`}
+            className={`rounded-md p-1.5 transition ${location.path && location.path !== "/" && location.path !== "__RECENTS__" && location.path !== "__TRASH__" ? buttonClass : "cursor-default opacity-30"}`}
           >
             <ChevronUp className="h-4 w-4" />
           </button>

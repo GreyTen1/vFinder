@@ -26,6 +26,7 @@ import {
   CheckCircle2,
   Loader2,
   Lock,
+  RotateCcw,
 } from "lucide-react";
 import {
   FileEntry,
@@ -391,7 +392,7 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
           <div className="p-4 flex items-center gap-3.5 border-b border-current/10">
             <div className="w-12 h-12 rounded-xl bg-[#0a84ff]/15 flex items-center justify-center shrink-0">
               {volume.isRemovable ? (
-                <Usb className="w-7 h-7 text-amber-400" />
+                <Usb className="w-7 h-7 text-[#0a84ff]" />
               ) : volume.isSystem ? (
                 <Disc className="w-7 h-7 text-purple-400" />
               ) : (
@@ -622,6 +623,18 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
             <span className="opacity-55 text-right pr-2">Where:</span>
             <span className="col-span-2 break-all opacity-85">{entry.path}</span>
           </div>
+          {entry.originalPath && (
+            <div className="grid grid-cols-3 gap-1">
+              <span className="opacity-55 text-right pr-2">Original:</span>
+              <span className="col-span-2 break-all opacity-85">{entry.originalPath}</span>
+            </div>
+          )}
+          {entry.deletedAt ? (
+            <div className="grid grid-cols-3 gap-1">
+              <span className="opacity-55 text-right pr-2">Deleted:</span>
+              <span className="col-span-2">{formatMacDate(entry.deletedAt)}</span>
+            </div>
+          ) : null}
           <div className="grid grid-cols-3 gap-1">
             <span className="opacity-55 text-right pr-2">Created:</span>
             <span className="col-span-2">{formatMacDate(entry.created)}</span>
@@ -857,6 +870,12 @@ interface ContextMenuProps {
   onFormatVolume?: (vol: VolumeInfo) => void;
   onFirstAidVolume?: (vol: VolumeInfo) => void;
   onToast?: (message: string) => void;
+  isTrashView?: boolean;
+  onRestoreTrash?: (entry?: FileEntry) => void;
+  onRestoreAllTrash?: () => void;
+  onDeletePermanently?: (entry?: FileEntry) => void;
+  onEmptyTrash?: () => void;
+  trashEmpty?: boolean;
 }
 
 export const ContextMenu: React.FC<ContextMenuProps> = ({
@@ -893,6 +912,12 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onFormatVolume,
   onFirstAidVolume,
   onToast,
+  isTrashView = false,
+  onRestoreTrash,
+  onRestoreAllTrash,
+  onDeletePermanently,
+  onEmptyTrash,
+  trashEmpty = false,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
   useToolbarOutsideDismiss(menuRef, Boolean(menu), onClose);
@@ -991,7 +1016,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 }}
                 className={itemCls}
               >
-                <Disc className="w-3.5 h-3.5 text-amber-400" />
+                <Disc className="w-3.5 h-3.5 opacity-70" />
                 <span className="truncate">Eject “{volume.name}”</span>
                 <span className="ml-auto opacity-60 text-[10px]">⏏</span>
               </button>
@@ -1069,7 +1094,34 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               <ExternalLink className="w-3.5 h-3.5" />
               <span>Open in New Tab</span>
             </button>
-            {favorite.path !== "__RECENTS__" && (
+            {favorite.path === "__TRASH__" && (
+              <>
+                <div className="my-1 border-t border-current/10" />
+                <button
+                  disabled={trashEmpty}
+                  onClick={() => {
+                    onRestoreAllTrash?.();
+                    onClose();
+                  }}
+                  className={`${itemCls} disabled:opacity-40 disabled:pointer-events-none`}
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-[#0a84ff]" />
+                  <span>Restore All Items</span>
+                </button>
+                <button
+                  disabled={trashEmpty}
+                  onClick={() => {
+                    onEmptyTrash?.();
+                    onClose();
+                  }}
+                  className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Empty Trash…</span>
+                </button>
+              </>
+            )}
+            {favorite.path !== "__RECENTS__" && favorite.path !== "__TRASH__" && (
               <>
                 <div className="my-1 border-t border-current/10" />
                 <button
@@ -1106,6 +1158,78 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Remove from Sidebar</span>
+            </button>
+          </>
+        ) : entry && isTrashView ? (
+          <>
+            <button
+              onClick={() => {
+                onRestoreTrash?.(isMultiSelected ? undefined : entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-[#0a84ff]" />
+              <span className="font-medium truncate">Put Back{countSuffix}</span>
+            </button>
+            <button
+              onClick={() => {
+                onQuickLook(entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span>Quick Look</span>
+              <span className="ml-auto opacity-60 text-[10px]">Space</span>
+            </button>
+            <div className="my-1 border-t border-current/10" />
+            <button
+              onClick={() => {
+                onGetInfo(entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Info className="w-3.5 h-3.5" />
+              <span>Get Info</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+I</span>
+            </button>
+            <button
+              onClick={() => {
+                onCopy(isMultiSelected ? undefined : entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copy{countSuffix}</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+C</span>
+            </button>
+            {!isMultiSelected && entry.originalPath && (
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(entry.originalPath!);
+                  onToast?.(`Copied original path: ${entry.originalPath}`);
+                  onClose();
+                }}
+                className={itemCls}
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy Original Path</span>
+              </button>
+            )}
+            <div className="my-1 border-t border-current/10" />
+            <button
+              onClick={() => {
+                onDeletePermanently?.(isMultiSelected ? undefined : entry);
+                onClose();
+              }}
+              className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Delete Immediately…{countSuffix}</span>
+              <span className="ml-auto opacity-60 text-[10px]">Del</span>
             </button>
           </>
         ) : entry ? (
@@ -1289,6 +1413,32 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               <span className="ml-auto opacity-60 text-[10px]">Ctrl+Del</span>
             </button>
           </>
+        ) : isTrashView ? (
+          <>
+            <button
+              disabled={trashEmpty}
+              onClick={() => {
+                onRestoreAllTrash?.();
+                onClose();
+              }}
+              className={`${itemCls} disabled:opacity-40 disabled:pointer-events-none`}
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-[#0a84ff]" />
+              <span>Restore All Items</span>
+            </button>
+            <div className="my-1 border-t border-current/10" />
+            <button
+              disabled={trashEmpty}
+              onClick={() => {
+                onEmptyTrash?.();
+                onClose();
+              }}
+              className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Empty Trash…</span>
+            </button>
+          </>
         ) : (
           <>
             <button
@@ -1381,6 +1531,8 @@ export const BottomBars: React.FC<BottomBarsProps> = ({
   const segments =
     currentPath === "__RECENTS__"
       ? [{ name: "Recents", path: "__RECENTS__" }]
+      : currentPath === "__TRASH__"
+      ? [{ name: "Trash", path: "__TRASH__" }]
       : currentPath === "/"
       ? [{ name: rootLabel, path: "/" }]
       : [
@@ -1433,7 +1585,11 @@ export const BottomBars: React.FC<BottomBarsProps> = ({
                       : "hover:bg-white/10"
                   }`}
                 >
-                  <Folder className="w-3 h-3 text-[#0a84ff]" />
+                  {seg.path === "__TRASH__" ? (
+                    <Trash2 className="w-3 h-3 text-[#0a84ff]" />
+                  ) : (
+                    <Folder className="w-3 h-3 text-[#0a84ff]" />
+                  )}
                   <span
                     className={
                       i === segments.length - 1 ? "font-medium text-current" : ""
@@ -1478,7 +1634,7 @@ export const BottomBars: React.FC<BottomBarsProps> = ({
  * 5. MACOS SUDO PASSWORD AUTHENTICATION PROMPT
  * ========================================================================== */
 export interface SudoPromptState {
-  action: "mount" | "unmount" | "format" | "firstaid";
+  action: "mount" | "unmount" | "format" | "firstaid" | "elevate";
   volumeName: string;
   device: string;
   error?: string | null;
@@ -1585,11 +1741,22 @@ export const SudoPromptModal: React.FC<SudoPromptModalProps> = ({
         </div>
 
         <h3 className="text-[14px] font-bold leading-snug">
-          vFinder wants to {actionVerb} “{prompt.volumeName}”
+          {prompt.action === "elevate"
+            ? "vFinder wants to start a Root Session"
+            : `vFinder wants to ${actionVerb} “${prompt.volumeName}”`}
         </h3>
         <p className="text-xs opacity-65 mt-1">
-          Enter your administrator (sudo) password to {actionVerb}{" "}
-          <span className="font-mono">{prompt.device}</span>.
+          {prompt.action === "elevate" ? (
+            <>
+              Enter your administrator (sudo) password to launch{" "}
+              <span className="font-mono">vFinder</span> with root privileges.
+            </>
+          ) : (
+            <>
+              Enter your administrator (sudo) password to {actionVerb}{" "}
+              <span className="font-mono">{prompt.device}</span>.
+            </>
+          )}
         </p>
 
         <div className="w-full mt-4 text-left space-y-2">
@@ -1644,6 +1811,8 @@ export const SudoPromptModal: React.FC<SudoPromptModalProps> = ({
           >
             {prompt.busy
               ? "Authenticating..."
+              : prompt.action === "elevate"
+              ? "Start Root Session"
               : prompt.action === "mount"
               ? "Mount"
               : prompt.action === "unmount"

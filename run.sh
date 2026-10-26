@@ -5,8 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [[ "${1:-}" == "--dev" ]]; then
+    shift
     echo "Starting vFinder in development mode (Vite + Cargo watch)..."
-    exec npm run tauri dev
+    if [[ $# -gt 0 ]]; then
+        exec npm run tauri dev -- -- "$@"
+    else
+        exec npm run tauri dev
+    fi
 fi
 
 RELEASE_BIN="$SCRIPT_DIR/src-tauri/target/release/vfinder"
@@ -22,4 +27,4 @@ fi
 
 # Use WebKitGTK hardware acceleration flags for smooth rendering
 export WEBKIT_DISABLE_COMPOSITING_MODE=0
-exec "$RELEASE_BIN"
+exec "$RELEASE_BIN" "$@"

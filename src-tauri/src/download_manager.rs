@@ -59,8 +59,8 @@ pub struct DownloadFailedPayload {
 }
 
 pub fn get_default_downloads_dir() -> String {
-    dirs::download_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+    crate::commands::effective_user_subdir(dirs::download_dir, "Downloads")
+        .or_else(|| Some(crate::commands::effective_user_home_dir().join("Downloads")))
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .to_string_lossy()
         .to_string()

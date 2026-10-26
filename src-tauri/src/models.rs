@@ -20,6 +20,10 @@ pub struct FileEntry {
     pub child_count: Option<usize>,
     pub tags: Vec<String>,
     pub default_app: Option<String>,
+    #[serde(default)]
+    pub original_path: Option<String>,
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +74,8 @@ pub struct VolumeInfo {
 pub struct SidebarData {
     pub home_dir: String,
     pub os_name: String,
+    pub is_root: bool,
+    pub needs_sudo_elevation: bool,
     pub favorites: Vec<UserDirectory>,
     pub volumes: Vec<VolumeInfo>,
     pub tags: HashMap<String, Vec<String>>,

@@ -25,6 +25,7 @@ export interface SelectionModifiers {
 
 export interface CommonViewProps {
   entries: FileEntry[];
+  revealPath?: string | null;
   selectedPaths: string[];
   onSelect: (
     entry: FileEntry,
@@ -547,6 +548,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
 
 export const IconView: React.FC<CommonViewProps> = ({
   entries,
+  revealPath,
   selectedPaths,
   onSelect,
   onSetSelection,
@@ -621,7 +623,10 @@ export const IconView: React.FC<CommonViewProps> = ({
 
   const handleGridScroll = useCallback(() => {
     if (gridScrollFrameRef.current !== null) return;
-    gridScrollFrameRef.current = requestAnimationFrame(() => {
+    // Keep icon virtualization responsive while the native window is hidden.
+    // WebKitGTK can suspend requestAnimationFrame in that state, but file
+    // manager reveal requests need scrolling to materialize their target first.
+    gridScrollFrameRef.current = window.setTimeout(() => {
       gridScrollFrameRef.current = null;
       const container = containerRef.current;
       if (!container) return;
@@ -630,19 +635,21 @@ export const IconView: React.FC<CommonViewProps> = ({
           ? current
           : { ...current, top: container.scrollTop }
       );
-    });
+    }, 16);
   }, []);
 
   useEffect(
     () => () => {
       if (gridScrollFrameRef.current !== null) {
-        cancelAnimationFrame(gridScrollFrameRef.current);
+        window.clearTimeout(gridScrollFrameRef.current);
       }
     },
     []
   );
 
-  const isLargeGrid = entries.length > 300;
+  // Temporarily render the full grid during an external reveal so the target
+  // exists in the DOM and can be centered before virtualization resumes.
+  const isLargeGrid = entries.length > 300 && !revealPath;
   const contentWidth = Math.max(0, gridViewport.width - 40);
   const columnCount = isLargeGrid
     ? Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)))
@@ -664,6 +671,19 @@ export const IconView: React.FC<CommonViewProps> = ({
   const renderedEntries = isLargeGrid
     ? entries.slice(firstVisibleIndex, lastVisibleIndex)
     : entries;
+  const revealEntryIndex = revealPath
+    ? entries.findIndex((entry) => entry.path === revealPath)
+    : -1;
+  const renderedItems = renderedEntries.map((entry, visibleIndex) => ({
+    entry,
+    index: isLargeGrid ? firstVisibleIndex + visibleIndex : visibleIndex,
+  }));
+  if (
+    revealEntryIndex >= 0 &&
+    !renderedItems.some((item) => item.index === revealEntryIndex)
+  ) {
+    renderedItems.push({ entry: entries[revealEntryIndex], index: revealEntryIndex });
+  }
 
   return (
     <div
@@ -689,8 +709,7 @@ export const IconView: React.FC<CommonViewProps> = ({
             ...(isLargeGrid ? { gridAutoRows: `${itemHeight}px` } : {}),
           }}
         >
-          {renderedEntries.map((entry, visibleIndex) => {
-            const index = firstVisibleIndex + visibleIndex;
+          {renderedItems.map(({ entry, index }) => {
             return (
               <IconViewItem
                 key={entry.path}

@@ -27,6 +27,7 @@ import {
   Square,
   Folder,
   Columns2,
+  Trash2,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FinderTab, SortDirection, SortField, ViewMode } from "../types";
@@ -73,6 +74,9 @@ interface ToolbarProps {
   activeDownloadsCount?: number;
   onToggleDownloads?: () => void;
   downloadsOpen?: boolean;
+  isRoot?: boolean;
+  isTrashActive?: boolean;
+  onOpenTrash?: () => void;
 }
 
 interface TabDragState {
@@ -143,6 +147,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   activeDownloadsCount = 0,
   onToggleDownloads,
   downloadsOpen = false,
+  isRoot = false,
+  isTrashActive = false,
+  onOpenTrash,
 }) => {
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
@@ -625,6 +632,43 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           >
             {currentTitle}
           </h1>
+
+          {/* Root Session Privilege Badge / Logo */}
+          {isRoot && (
+            <div
+              data-tauri-drag-region
+              title="Root Session (--sudo) • Running with elevated root privileges"
+              className={`shrink-0 ml-1 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[10px] font-bold tracking-wider uppercase shadow-xs ${
+                darkMode
+                  ? "bg-gradient-to-r from-[#ff453a]/20 via-[#ff6961]/15 to-[#ff9f0a]/20 border-[#ff453a]/45 text-[#ff6961]"
+                  : "bg-gradient-to-r from-[#ff453a]/15 to-[#ff9f0a]/15 border-[#ff453a]/40 text-[#d70015]"
+              }`}
+            >
+              <svg
+                data-tauri-drag-region
+                viewBox="0 0 16 16"
+                className="w-3.5 h-3.5 shrink-0"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path
+                  d="M8 1.5L2.75 3.75V7.6C2.75 11.05 5.02 13.95 8 14.75C10.98 13.95 13.25 11.05 13.25 7.6V3.75L8 1.5Z"
+                  fill="currentColor"
+                  fillOpacity="0.22"
+                  stroke="currentColor"
+                  strokeWidth="1.35"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M6.35 5.5L5.65 10.5M10.35 5.5L9.65 10.5M5.1 7.15H10.9M4.85 8.95H10.65"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                  strokeLinecap="round"
+                />
+              </svg>
+              <span data-tauri-drag-region>ROOT</span>
+            </div>
+          )}
         </div>
 
         {/* Center Section: 4-Way macOS Segmented View Switcher (Horizontally centered via flex-1 balance) */}
@@ -877,6 +921,28 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             )}
           </div>
 
+          {/* Recycle Bin / Trash Button */}
+          {onOpenTrash && (
+            <button
+              type="button"
+              data-drop-path="__TRASH__"
+              data-drop-name="Trash"
+              onClick={onOpenTrash}
+              title="Trash / Recycle Bin"
+              className={`p-1.5 rounded-md transition relative ${btnBase} ${
+                dropTargetPath === "__TRASH__"
+                  ? "ring-2 ring-[#0a84ff] bg-[#0a84ff]/25 text-white"
+                  : isTrashActive
+                  ? darkMode
+                    ? "bg-white/15 text-[#0a84ff]"
+                    : "bg-black/10 text-[#0a84ff]"
+                  : ""
+              }`}
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )}
+
           {/* Downloads Manager Toggle Button */}
           {onToggleDownloads && (
             <div className="relative">
@@ -945,7 +1011,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         }`}
       >
         <div
-          className={`flex h-[calc(100%+2px)] min-w-0 self-start items-end gap-1 overflow-x-auto pb-[2px] ${splitTab ? "w-1/2 shrink-0" : "w-full"}`}
+          className={`flex h-[calc(100%+2px)] min-w-0 self-start items-end gap-3 overflow-x-auto px-3.5 -mx-3.5 pb-[2px] ${splitTab ? "w-1/2 shrink-0" : "w-full"}`}
           style={
             splitTab && splitTabLeft !== null
               ? {
@@ -979,17 +1045,17 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               role="tab"
               aria-selected={isActive}
               tabIndex={isActive ? 0 : -1}
-              className={`group relative flex min-w-[88px] flex-[1_1_220px] items-center gap-1.5 pl-2.5 pr-1.5 h-8 rounded-t-xl rounded-b-none ${isActive ? `workspace-tab-active ${darkMode ? "workspace-tab-active-dark" : "workspace-tab-active-light"} z-20 translate-y-[2px]` : "translate-y-[1px]"} ${draggingTabId === tab.id ? "cursor-grabbing opacity-30" : "cursor-default"} transition-colors duration-150 max-w-[260px] border select-none ${
+              className={`group relative flex min-w-[88px] flex-[1_1_220px] items-center gap-1.5 pl-3 pr-1.5 h-8 rounded-t-2xl rounded-b-none ${isActive ? `workspace-tab-active ${darkMode ? (isArchiveWorkspace ? "workspace-tab-active-archive-dark" : "workspace-tab-active-dark") : (isArchiveWorkspace ? "workspace-tab-active-archive-light" : "workspace-tab-active-light")} z-20 translate-y-[2px]` : "translate-y-[1px]"} ${draggingTabId === tab.id ? "cursor-grabbing opacity-30" : "cursor-default"} transition-colors duration-150 max-w-[260px] border select-none ${
                 isDropTarget
                   ? "border-[#0a84ff]/70 bg-[#0a84ff]/20 text-white shadow-sm"
                   : isActive
                   ? darkMode
                     ? isArchiveWorkspace
-                      ? "border-[#9692D6]/35 border-b-0 bg-[#29273a] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
-                      : "border-white/10 border-b-0 bg-[#202024] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
+                      ? "border-[#4f4c71] border-b-0 bg-[#29273a] text-white"
+                      : "border-[#36363a] border-b-0 bg-[#202024] text-white"
                     : isArchiveWorkspace
-                      ? "border-[#807bc0]/30 border-b-0 bg-[#efedf8] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
-                      : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
+                      ? "border-[#cecbe7] border-b-0 bg-[#efedf8] text-zinc-900"
+                      : "border-[#dadadd] border-b-0 bg-[#f2f2f5] text-zinc-900"
                   : darkMode
                   ? isArchiveWorkspace
                     ? "border-[#9692D6]/10 bg-[#9692D6]/[0.07] text-zinc-300 hover:bg-[#9692D6]/[0.13] hover:text-zinc-100"
@@ -1002,6 +1068,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               {isArchiveWorkspace ? (
                 <ArchiveZipperMark
                   className={`w-3.5 h-3.5 shrink-0 ${isActive ? "text-[#a6a0ef]" : "opacity-70"}`}
+                />
+              ) : tab.path === "__TRASH__" ? (
+                <Trash2
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    isActive ? "text-[#0a84ff]" : "opacity-65"
+                  }`}
                 />
               ) : (
                 <Folder
@@ -1081,7 +1153,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           }}
           title="New Tab (Ctrl+T)"
           aria-label="New tab"
-          className={`flex translate-y-[2px] items-center justify-center w-8 h-7 ml-0.5 rounded-lg shrink-0 cursor-pointer transition-colors ${
+          className={`flex items-center justify-center w-7 h-7 mb-0.5 ml-0.5 rounded-full shrink-0 cursor-pointer transition-colors ${
             darkMode
               ? "text-zinc-400 hover:bg-white/10 hover:text-zinc-100"
               : "text-zinc-600 hover:bg-black/[0.06] hover:text-zinc-900"
@@ -1104,14 +1176,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             <div
               ref={splitTabElementRef}
               key={splitTab.id}
-              className={`workspace-tab-active ${darkMode ? "workspace-tab-active-dark" : "workspace-tab-active-light"} group relative z-20 flex h-8 min-w-[88px] flex-[1_1_220px] max-w-[260px] translate-y-[2px] items-center gap-1.5 rounded-t-xl rounded-b-none border pl-2.5 pr-1.5 text-[11px] font-medium ${
+              className={`workspace-tab-active ${darkMode ? (splitIsArchiveWorkspace ? "workspace-tab-active-archive-dark" : "workspace-tab-active-dark") : (splitIsArchiveWorkspace ? "workspace-tab-active-archive-light" : "workspace-tab-active-light")} group relative z-20 flex h-8 min-w-[88px] flex-[1_1_220px] max-w-[260px] translate-y-[2px] items-center gap-1.5 rounded-t-2xl rounded-b-none border pl-3 pr-1.5 text-[11px] font-medium ${
                 darkMode
                   ? splitIsArchiveWorkspace
-                    ? "border-[#9692D6]/35 border-b-0 bg-[#29273a] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
-                    : "border-white/10 border-b-0 bg-[#202024] text-white shadow-[0_-1px_5px_rgba(0,0,0,0.16)]"
+                    ? "border-[#4f4c71] border-b-0 bg-[#29273a] text-white"
+                    : "border-[#36363a] border-b-0 bg-[#202024] text-white"
                   : splitIsArchiveWorkspace
-                    ? "border-[#807bc0]/30 border-b-0 bg-[#efedf8] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
-                    : "border-black/10 border-b-0 bg-[#f2f2f5] text-zinc-900 shadow-[0_-1px_5px_rgba(0,0,0,0.08)]"
+                    ? "border-[#cecbe7] border-b-0 bg-[#efedf8] text-zinc-900"
+                    : "border-[#dadadd] border-b-0 bg-[#f2f2f5] text-zinc-900"
               }`}
               role="tab"
               aria-selected="true"

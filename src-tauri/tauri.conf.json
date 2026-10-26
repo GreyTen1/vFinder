@@ -50,6 +50,19 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "vfinder.desktop"
+      },
+      "rpm": {
+        "desktopTemplate": "vfinder.desktop"
+      },
+      "appimage": {
+        "files": {
+          "usr/share/applications/vFinder.desktop": "vfinder.desktop"
+        }
+      }
+    },
     "icon": [
       "icons/128x128.png",
       "icons/128x128@2x.png",

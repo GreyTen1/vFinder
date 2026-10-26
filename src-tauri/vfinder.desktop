@@ -1,0 +1,10 @@
+[Desktop Entry]
+Categories={{categories}}
+Comment={{comment}}
+Exec={{exec}} %U
+StartupWMClass=vfinder
+Icon={{icon}}
+MimeType=inode/directory;
+Name={{name}}
+Terminal=false
+Type=Application

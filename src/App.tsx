@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { Archive, Loader2 } from "lucide-react";
+import { Archive, Loader2, Trash2, RotateCcw, AlertTriangle } from "lucide-react";
 import {
   ClipboardState,
   FileEntry,
@@ -33,6 +33,10 @@ import {
   apiGetFilesByTag,
   apiGetSidebarData,
   apiGetStartupDirectory,
+  apiGetStartupSelection,
+  apiElevateToRootSession,
+  apiFileManagerFrontendReady,
+  apiTakeFileManagerRequests,
   apiExtractArchive,
   apiMountPartition,
   apiMoveItems,
@@ -48,6 +52,10 @@ import {
   apiCloseMainWindow,
   apiToggleItemTag,
   apiTrashItems,
+  apiGetTrashFiles,
+  apiRestoreTrashItems,
+  apiDeleteTrashItemsPermanently,
+  apiEmptyTrash,
   apiUnmountPartition,
   apiStartDownload,
   apiCancelDownload,
@@ -111,6 +119,7 @@ function areEntriesEqual(a: FileEntry[], b: FileEntry[]): boolean {
 
 function folderDisplayName(path: string, rootName = "Linux"): string {
   if (path === "__RECENTS__") return "Recents";
+  if (path === "__TRASH__") return "Trash";
   if (path === "/" || path === "") return rootName;
   const parts = path.split("/").filter(Boolean);
   return parts[parts.length - 1] || path;
@@ -332,6 +341,7 @@ export const App: React.FC = () => {
   }, [Boolean(splitPane), sidebarLayoutOpen, splitPaneRatio]);
 
   const [entries, setEntries] = useState<FileEntry[]>([]);
+  const [entriesLoadedPath, setEntriesLoadedPath] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const lastSelectedPathRef = useRef<string | null>(null);
   const selectedPathsRef = useRef<string[]>([]);
@@ -480,6 +490,11 @@ export const App: React.FC = () => {
   const columnActivePathRef = useRef<string | null>(null);
   columnActivePathRef.current = columnActivePath;
   const [sudoPrompt, setSudoPrompt] = useState<SudoPromptState | null>(null);
+  const [trashConfirmModal, setTrashConfirmModal] = useState<{
+    mode: "empty" | "delete-selected";
+    paths?: string[];
+    count: number;
+  } | null>(null);
   const [clipboard, setClipboard] = useState<ClipboardState | null>(null);
   const undoStackRef = useRef<MoveUndoAction[]>([]);
   const undoInProgressRef = useRef(false);
@@ -560,6 +575,14 @@ export const App: React.FC = () => {
   );
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+  const [pendingFileManagerReveal, setPendingFileManagerReveal] = useState<{
+    directory: string;
+    selectedPaths: string[];
+    showProperties?: boolean;
+  } | null>(null);
+  const pendingFileManagerRevealRef = useRef(pendingFileManagerReveal);
+  pendingFileManagerRevealRef.current = pendingFileManagerReveal;
+  const [pendingRevealScrollPath, setPendingRevealScrollPath] = useState<string | null>(null);
 
   const isFavoritePath = useCallback(
     (p: string) => {
@@ -672,8 +695,27 @@ export const App: React.FC = () => {
   }, [showToast]);
 
   useEffect(() => {
-    Promise.all([refreshSidebar(), apiGetStartupDirectory()]).then(([data, startupDirectory]) => {
+    Promise.all([
+      refreshSidebar(),
+      apiGetStartupDirectory(),
+      apiGetStartupSelection(),
+    ]).then(([data, startupDirectory, startupSelection]) => {
+      if (data?.needsSudoElevation) {
+        setSudoPrompt({
+          action: "elevate",
+          volumeName: "vFinder",
+          device: "root",
+          error: null,
+          busy: false,
+        });
+      }
       if (data?.homeDir) {
+        if (startupSelection && startupDirectory) {
+          setPendingFileManagerReveal({
+            directory: startupDirectory,
+            selectedPaths: [startupSelection],
+          });
+        }
         setTabs((prev) => {
           if (
             prev.length === 1 &&
@@ -821,7 +863,8 @@ export const App: React.FC = () => {
           list = await apiGetFilesByTag(activeTab.activeTag);
         } else if (
           effectiveSearch.length > 0 &&
-          activeTab.path !== "__RECENTS__"
+          activeTab.path !== "__RECENTS__" &&
+          activeTab.path !== "__TRASH__"
         ) {
           list = await apiSearchDirectory(
             activeTab.path,
@@ -830,6 +873,10 @@ export const App: React.FC = () => {
           );
         } else {
           list = await apiReadDirectory(activeTab.path, showHidden);
+          if (effectiveSearch.length > 0) {
+            const q = effectiveSearch.toLowerCase();
+            list = list.filter((e) => e.name.toLowerCase().includes(q));
+          }
         }
 
         if (reqId !== requestIdRef.current) return;
@@ -842,6 +889,7 @@ export const App: React.FC = () => {
       } finally {
         if (reqId === requestIdRef.current) {
           setEntriesReady(true);
+          setEntriesLoadedPath(activeTab.path);
         }
       }
     },
@@ -1050,6 +1098,100 @@ export const App: React.FC = () => {
     ]
   );
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let pollTimer: number | undefined;
+    let active = true;
+    const handleFileManagerRequest = (payload: {
+      directory: string;
+      selectedPaths: string[];
+      showProperties?: boolean;
+    }) => {
+      if (!payload.directory) return;
+      const selectedPaths = payload.selectedPaths || [];
+      setPendingFileManagerReveal({
+        directory: payload.directory,
+        selectedPaths,
+        showProperties: payload.showProperties,
+      });
+      if (activeTabRef.current?.path !== payload.directory) {
+        navigateTo(payload.directory);
+      } else {
+        setSearchQuery("");
+        setDebouncedSearchQuery("");
+        if (selectedPaths.length > 0) {
+          // Refresh the current folder too, since a download may have just
+          // completed before Brave requested that it be revealed.
+          void loadCurrentEntries(true);
+        }
+      }
+    };
+    const drainPendingRequests = () => {
+      void apiTakeFileManagerRequests()
+        .then((requests) => requests.forEach(handleFileManagerRequest))
+        .catch(() => {});
+    };
+    void listen("file-manager-show-items", drainPendingRequests).then(async (fn) => {
+      unlisten = fn;
+      // The native D-Bus service can receive Brave's request before this
+      // WebView has mounted. Drain those requests only after the listener is
+      // active, so the first reveal is not lost during app startup.
+      const pendingRequests = await apiFileManagerFrontendReady();
+      if (!active) return;
+      pendingRequests.forEach(handleFileManagerRequest);
+      pollTimer = window.setInterval(drainPendingRequests, 500);
+    });
+    return () => {
+      active = false;
+      if (pollTimer !== undefined) window.clearInterval(pollTimer);
+      unlisten?.();
+    };
+  }, [navigateTo, loadCurrentEntries]);
+
+  useEffect(() => {
+    const pending = pendingFileManagerReveal;
+    if (
+      !pending ||
+      activeTab?.path !== pending.directory ||
+      entriesLoadedPath !== pending.directory
+    ) return;
+    const findRequestedEntry = (path: string) => {
+      const exactMatch = entries.find((entry) => entry.path === path);
+      if (exactMatch) return exactMatch;
+      const requestedName = path.split(/[\\/]/).pop();
+      return requestedName
+        ? entries.find((entry) => entry.name === requestedName)
+        : undefined;
+    };
+    const requestedEntries = pending.selectedPaths.map(findRequestedEntry);
+    if (
+      pending.selectedPaths.length > 0 &&
+      requestedEntries.some((entry) => !entry)
+    ) {
+      // Navigation can render once with the previous folder's entries. Keep
+      // the reveal request until the requested item arrives in this listing.
+      return;
+    }
+    if (pending.selectedPaths.length > 0) {
+      const matchedPaths = requestedEntries
+        .filter((entry): entry is FileEntry => Boolean(entry))
+        .map((entry) => entry.path);
+      setSelectedPaths(matchedPaths);
+      lastSelectedPathRef.current = matchedPaths[0];
+      setPendingRevealScrollPath(matchedPaths[0]);
+    } else {
+      setPendingFileManagerReveal(null);
+      windowShownRef.current = true;
+      void apiShowMainWindow();
+    }
+    if (pending.showProperties && pending.selectedPaths[0]) {
+      const targetPath = pending.selectedPaths[0];
+      const entry = findRequestedEntry(targetPath);
+      if (entry) setGetInfoEntry(entry);
+      else void apiGetFileInfo(targetPath).then(setGetInfoEntry).catch(() => {});
+    }
+  }, [activeTab?.path, entries, entriesLoadedPath, pendingFileManagerReveal]);
+
   const selectTagFilter = useCallback(
     (tagColor: string) => {
       setSearchQuery("");
@@ -1123,11 +1265,12 @@ export const App: React.FC = () => {
   const canGoUp = Boolean(
     activeTab &&
     activeTab.path !== "/" &&
-    activeTab.path !== "__RECENTS__"
+    activeTab.path !== "__RECENTS__" &&
+    activeTab.path !== "__TRASH__"
   );
 
   const goUp = useCallback(() => {
-    if (!activeTab || activeTab.path === "/" || activeTab.path === "__RECENTS__") return;
+    if (!activeTab || activeTab.path === "/" || activeTab.path === "__RECENTS__" || activeTab.path === "__TRASH__") return;
     const parts = activeTab.path.split("/").filter(Boolean);
     parts.pop();
     const parent = "/" + parts.join("/");
@@ -1457,7 +1600,7 @@ export const App: React.FC = () => {
         (viewMode === "columns" && columnActivePathRef.current
           ? columnActivePathRef.current
           : activeTab?.path);
-      if (!targetDir || targetDir === "__RECENTS__" || activeTab?.activeTag) {
+      if (!targetDir || targetDir === "__RECENTS__" || targetDir === "__TRASH__" || activeTab?.activeTag) {
         showToast("Navigate to a folder first to create a new folder");
         return;
       }
@@ -1512,7 +1655,7 @@ export const App: React.FC = () => {
         (viewMode === "columns" && columnActivePathRef.current
           ? columnActivePathRef.current
           : activeTab?.path);
-      if (!targetDir || targetDir === "__RECENTS__" || activeTab?.activeTag) {
+      if (!targetDir || targetDir === "__RECENTS__" || targetDir === "__TRASH__" || activeTab?.activeTag) {
         showToast("Navigate to a folder first to create a file");
         return;
       }
@@ -1691,6 +1834,107 @@ export const App: React.FC = () => {
     [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
   );
 
+  const handleRestoreTrash = useCallback(
+    async (targetEntry?: FileEntry) => {
+      const targets = targetEntry ? [targetEntry.path] : selectedPaths;
+      if (targets.length === 0) return;
+      try {
+        const restored = await runWithActivity(
+          `Restoring ${targets.length} item(s)...`,
+          () => apiRestoreTrashItems(targets)
+        );
+        setSelectedPaths([]);
+        await loadCurrentEntries(true);
+        setSplitPaneRefreshVersion((version) => version + 1);
+        showToast(
+          restored.length === 1
+            ? `Restored to "${restored[0]}"`
+            : `Restored ${restored.length} items to their original locations`
+        );
+      } catch (err) {
+        showToast(`${err}`);
+      }
+    },
+    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
+  );
+
+  const handleRestoreAllTrash = useCallback(async () => {
+    try {
+      const allTrashPaths =
+        activeTab?.path === "__TRASH__"
+          ? entries.map((e) => e.path)
+          : (await apiGetTrashFiles(true)).map((e) => e.path);
+      if (allTrashPaths.length === 0) {
+        showToast("Trash is already empty");
+        return;
+      }
+      const restored = await runWithActivity(
+        `Restoring ${allTrashPaths.length} item(s)...`,
+        () => apiRestoreTrashItems(allTrashPaths)
+      );
+      setSelectedPaths([]);
+      await loadCurrentEntries(true);
+      setSplitPaneRefreshVersion((version) => version + 1);
+      showToast(`Restored ${restored.length} item(s) from Trash`);
+    } catch (err) {
+      showToast(`${err}`);
+    }
+  }, [activeTab?.path, entries, loadCurrentEntries, runWithActivity, showToast]);
+
+  const handleDeletePermanently = useCallback(
+    (targetEntry?: FileEntry) => {
+      const targets = targetEntry ? [targetEntry.path] : selectedPaths;
+      if (targets.length === 0) return;
+      setTrashConfirmModal({
+        mode: "delete-selected",
+        paths: targets,
+        count: targets.length,
+      });
+    },
+    [selectedPaths]
+  );
+
+  const handleEmptyTrash = useCallback(async () => {
+    const count =
+      activeTab?.path === "__TRASH__"
+        ? entries.length
+        : (await apiGetTrashFiles(true).catch(() => [])).length;
+    if (count === 0) {
+      showToast("Trash is already empty");
+      return;
+    }
+    setTrashConfirmModal({
+      mode: "empty",
+      count,
+    });
+  }, [activeTab?.path, entries.length, showToast]);
+
+  const confirmTrashAction = useCallback(async () => {
+    if (!trashConfirmModal) return;
+    const modal = trashConfirmModal;
+    setTrashConfirmModal(null);
+    try {
+      if (modal.mode === "empty") {
+        await runWithActivity("Emptying Trash...", () => apiEmptyTrash());
+        setSelectedPaths([]);
+        await loadCurrentEntries(true);
+        setSplitPaneRefreshVersion((version) => version + 1);
+        showToast("Emptied Trash");
+      } else if (modal.paths && modal.paths.length > 0) {
+        await runWithActivity(
+          `Permanently deleting ${modal.paths.length} item(s)...`,
+          () => apiDeleteTrashItemsPermanently(modal.paths!)
+        );
+        setSelectedPaths([]);
+        await loadCurrentEntries(true);
+        setSplitPaneRefreshVersion((version) => version + 1);
+        showToast(`Permanently deleted ${modal.paths.length} item(s)`);
+      }
+    } catch (err) {
+      showToast(`${err}`);
+    }
+  }, [trashConfirmModal, loadCurrentEntries, runWithActivity, showToast]);
+
   const handleCopy = useCallback(
     (entry?: FileEntry) => {
       const paths = entry
@@ -1727,7 +1971,7 @@ export const App: React.FC = () => {
         (viewMode === "columns" && columnActivePathRef.current
           ? columnActivePathRef.current
           : activeTab?.path);
-      if (!clipboard || !destDir || destDir === "__RECENTS__") return;
+      if (!clipboard || !destDir || destDir === "__RECENTS__" || destDir === "__TRASH__") return;
       try {
         if (clipboard.mode === "copy") {
           const created = await runWithActivity(
@@ -2015,6 +2259,24 @@ export const App: React.FC = () => {
             (candidatePath ? folderDisplayName(candidatePath) : null);
 
           if (candidatePath && candidatePath !== "__RECENTS__") {
+            if (candidatePath === "__TRASH__") {
+              if (activeTabRef.current?.path !== "__TRASH__") {
+                return {
+                  dropTargetPath: "__TRASH__",
+                  dropTargetName: "Trash",
+                  dropTargetTag: null,
+                  dropTargetTagName: null,
+                  dropFavoriteZone: false,
+                };
+              }
+              return {
+                dropTargetPath: null,
+                dropTargetName: null,
+                dropTargetTag: null,
+                dropTargetTagName: null,
+                dropFavoriteZone: false,
+              };
+            }
             // Cannot drop a folder into itself or its own descendant
             const invalidSelfDrop = dragPaths.some(
               (src) =>
@@ -2146,6 +2408,25 @@ export const App: React.FC = () => {
               .elementFromPoint(ev.clientX, ev.clientY)
               ?.closest("[data-split-pane]")
           );
+          if (destDir === "__TRASH__") {
+            try {
+              await runWithActivity(
+                `Moving ${dragPaths.length} item(s) to Trash...`,
+                async () => {
+                  await apiTrashItems(dragPaths);
+                  await loadCurrentEntries(true);
+                }
+              );
+              setSelectedPaths([]);
+              if (startedInSplitPane || droppedIntoSplitPane) {
+                setSplitPaneRefreshVersion((version) => version + 1);
+              }
+              showToast(`Moved ${dragPaths.length} item(s) to Trash`);
+            } catch (err) {
+              showToast(`${err}`);
+            }
+            return;
+          }
           try {
             if (isCopy) {
               const copied = await runWithActivity(
@@ -2416,6 +2697,21 @@ export const App: React.FC = () => {
           if (droppedPaths.length === 0 || !target) return;
 
           const destDir = target.targetPath;
+          if (destDir === "__TRASH__") {
+            try {
+              await runWithActivity(
+                `Moving ${droppedPaths.length} item(s) to Trash...`,
+                async () => {
+                  await apiTrashItems(droppedPaths);
+                  await loadCurrentEntries(true);
+                }
+              );
+              showToast(`Moved ${droppedPaths.length} item(s) to Trash`);
+            } catch (err) {
+              showToast(`${err}`);
+            }
+            return;
+          }
           const validSources = droppedPaths.filter(
             (src) =>
               src !== destDir &&
@@ -2789,7 +3085,10 @@ export const App: React.FC = () => {
         prev ? { ...prev, busy: true, error: null } : null
       );
       try {
-        if (sudoPrompt.action === "mount") {
+        if (sudoPrompt.action === "elevate") {
+          await apiElevateToRootSession(password);
+          setSudoPrompt(null);
+        } else if (sudoPrompt.action === "mount") {
           const mountedPath = await apiMountPartition(
             sudoPrompt.device,
             password
@@ -2858,23 +3157,84 @@ export const App: React.FC = () => {
   }, [sortedEntries, selectedPaths]);
 
   // Auto-scroll entry into view helper
-  const scrollEntryIntoView = useCallback((path: string, index?: number) => {
-    requestAnimationFrame(() => {
+  const scrollEntryIntoView = useCallback((
+    path: string,
+    index?: number,
+    block: ScrollLogicalPosition = "nearest",
+    inline: ScrollLogicalPosition = "nearest",
+    onCentered?: () => void
+  ) => {
+    const centerWithin = (container: HTMLElement, element: HTMLElement, axis: "x" | "y") => {
+      const containerRect = container.getBoundingClientRect();
+      const elementRect = element.getBoundingClientRect();
+      if (axis === "y") {
+        const viewportCenter = containerRect.top + container.clientTop + container.clientHeight / 2;
+        const elementCenter = elementRect.top + elementRect.height / 2;
+        container.scrollTop += elementCenter - viewportCenter;
+      } else {
+        const viewportCenter = containerRect.left + container.clientLeft + container.clientWidth / 2;
+        const elementCenter = elementRect.left + elementRect.width / 2;
+        container.scrollLeft += elementCenter - viewportCenter;
+      }
+    };
+
+    const scheduleScroll = (attemptsRemaining: number, virtualPositionApplied: boolean) => {
+      const performScroll = () => {
       try {
-        const selector = `[data-entry-path="${CSS.escape(path)}"]`;
-        const iconContainer =
-          viewMode === "icons"
-            ? document.querySelector<HTMLElement>('[data-tab-scroll-view="icons"]')
-            : null;
-        const el =
-          iconContainer?.querySelector(selector) || document.querySelector(selector);
+        const viewContainers = Array.from(
+          document.querySelectorAll<HTMLElement>(`[data-tab-scroll-view="${viewMode}"]`)
+        );
+        const iconContainer = viewContainers[0];
+        const el = viewContainers
+          .flatMap((container) => Array.from(container.querySelectorAll<HTMLElement>("[data-entry-path]")))
+          .find((element) => element.getAttribute("data-entry-path") === path);
         if (el) {
-          el.scrollIntoView({ block: "nearest", inline: "nearest" });
+          let hasLayout = false;
+          if (block === "center") {
+            let verticalScroller: HTMLElement | null = el.parentElement;
+            while (
+              verticalScroller &&
+              verticalScroller !== iconContainer &&
+              verticalScroller.scrollHeight <= verticalScroller.clientHeight + 1
+            ) {
+              verticalScroller = verticalScroller.parentElement;
+            }
+            if (verticalScroller && verticalScroller.clientHeight > 0 && el.getBoundingClientRect().height > 0) {
+              centerWithin(verticalScroller, el, "y");
+              hasLayout = true;
+            }
+
+            if (inline === "center") {
+              let horizontalScroller: HTMLElement | null = el.parentElement;
+              while (
+                horizontalScroller &&
+                horizontalScroller !== iconContainer &&
+                horizontalScroller.scrollWidth <= horizontalScroller.clientWidth + 1
+              ) {
+                horizontalScroller = horizontalScroller.parentElement;
+              }
+              if (horizontalScroller && horizontalScroller.clientWidth > 0 && el.getBoundingClientRect().width > 0) {
+                centerWithin(horizontalScroller, el, "x");
+                hasLayout = true;
+              }
+            }
+          } else {
+            el.scrollIntoView({ block, inline });
+            hasLayout = true;
+          }
+          if (onCentered && !hasLayout) {
+            if (attemptsRemaining > 0) {
+              window.setTimeout(() => scheduleScroll(attemptsRemaining - 1, virtualPositionApplied), 20);
+            }
+            return;
+          }
+          if (onCentered) window.setTimeout(onCentered, 80);
           return;
         }
-        if (typeof index === "number" && index >= 0 && viewMode === "icons") {
-          const container = iconContainer;
-          if (container) {
+
+        if (!virtualPositionApplied && typeof index === "number" && index >= 0 && viewMode === "icons") {
+          if (iconContainer) {
+            const container = iconContainer;
             const cellWidth = Math.max(96, iconSize + 44);
             const contentWidth = Math.max(0, container.clientWidth - 40);
             const columns = Math.max(
@@ -2883,26 +3243,48 @@ export const App: React.FC = () => {
             );
             const rowPitch = iconSize + 73;
             const targetTop = 20 + Math.floor(index / columns) * rowPitch;
-            if (targetTop < container.scrollTop) {
-              container.scrollTop = targetTop;
-            } else if (targetTop + rowPitch > container.scrollTop + container.clientHeight) {
-              container.scrollTop = targetTop + rowPitch - container.clientHeight;
-            }
-            return;
-          }
-        }
-        if (typeof index === "number" && index >= 0) {
-          const container = document.querySelector(".list-view-container");
-          if (container) {
-            const rowHeight = 28;
-            container.scrollTop = Math.max(0, index * rowHeight - container.clientHeight / 2);
+            container.scrollTop = block === "center"
+              ? Math.max(0, targetTop - (container.clientHeight - rowPitch) / 2)
+              : targetTop;
           }
         }
       } catch {
         // ignore
       }
-    });
+      if (attemptsRemaining > 0) {
+        window.setTimeout(() => scheduleScroll(attemptsRemaining - 1, true), 20);
+      }
+      };
+      if (onCentered) window.setTimeout(performScroll, 0);
+      else requestAnimationFrame(performScroll);
+    };
+
+    scheduleScroll(onCentered ? 30 : 4, false);
   }, [viewMode, iconSize]);
+
+  useEffect(() => {
+    if (!pendingRevealScrollPath) return;
+    const index = sortedEntries.findIndex((entry) => entry.path === pendingRevealScrollPath);
+    scrollEntryIntoView(
+      pendingRevealScrollPath,
+      index >= 0 ? index : undefined,
+      "center",
+      "center",
+      () => {
+        const current = pendingFileManagerRevealRef.current;
+        if (
+          !current?.selectedPaths.some((path) =>
+            path === pendingRevealScrollPath ||
+            path.split(/[\\/]/).pop() === pendingRevealScrollPath.split(/[\\/]/).pop()
+          )
+        ) return;
+        setPendingRevealScrollPath(null);
+        setPendingFileManagerReveal(null);
+        windowShownRef.current = true;
+        void apiShowMainWindow();
+      }
+    );
+  }, [pendingRevealScrollPath, sortedEntries, scrollEntryIntoView]);
 
   useLayoutEffect(() => {
     if (!renamingPath) return;
@@ -3007,6 +3389,18 @@ export const App: React.FC = () => {
 
       const targetEl = e.target as HTMLInputElement | null;
       const tag = targetEl?.tagName;
+      if (trashConfirmModal) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setTrashConfirmModal(null);
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void confirmTrashAction();
+          return;
+        }
+      }
       // Delete / Supr moves selected files to Trash, even while search has focus.
       const isDeleteKey =
         e.key === "Delete" ||
@@ -3015,7 +3409,11 @@ export const App: React.FC = () => {
         e.keyCode === 46;
       if (isDeleteKey) {
         e.preventDefault();
-        handleTrash();
+        if (activeTab?.path === "__TRASH__") {
+          handleDeletePermanently();
+        } else {
+          handleTrash();
+        }
         return;
       }
       if (
@@ -3340,10 +3738,14 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Ctrl+Backspace -> Move to Trash
+      // Ctrl+Backspace -> Move to Trash (or permanently delete if in Trash)
       if (cmdOrCtrl && e.key === "Backspace") {
         e.preventDefault();
-        handleTrash();
+        if (activeTab?.path === "__TRASH__") {
+          handleDeletePermanently();
+        } else {
+          handleTrash();
+        }
       }
     };
 
@@ -3357,6 +3759,9 @@ export const App: React.FC = () => {
     getInfoEntry,
     getInfoVolume,
     contextMenu,
+    trashConfirmModal,
+    confirmTrashAction,
+    handleDeletePermanently,
     primarySelectedEntry,
     renamingPath,
     activeTab,
@@ -3528,6 +3933,7 @@ export const App: React.FC = () => {
 
   const commonViewProps = {
     entries: sortedEntries,
+    revealPath: pendingRevealScrollPath,
     isArchiveWorkspace,
     selectedPaths,
     onSelect: handleSelectEntry,
@@ -3696,6 +4102,9 @@ export const App: React.FC = () => {
         }
         downloadsOpen={downloadsPopoverOpen}
         onToggleDownloads={() => setDownloadsPopoverOpen((v) => !v)}
+        isRoot={Boolean(sidebarData?.isRoot)}
+        isTrashActive={activeTab?.path === "__TRASH__" && !activeTab?.activeTag}
+        onOpenTrash={() => navigateTo("__TRASH__", "Trash")}
       />
 
       {/* Toolbar Downloads Popover */}
@@ -3780,6 +4189,85 @@ export const App: React.FC = () => {
                   : ""
               }`}
             >
+              {activeTab?.path === "__TRASH__" && !activeTab?.activeTag && (
+                <div
+                  className={`flex items-center justify-between gap-3 px-4 py-2 border-b text-xs shrink-0 select-none ${
+                    darkMode
+                      ? "bg-[#26262b]/90 border-white/10 text-zinc-200"
+                      : "bg-[#ebebf0]/90 border-black/10 text-zinc-800"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Trash2 className="w-4 h-4 text-[#0a84ff] shrink-0" />
+                    <span className="font-semibold">Trash</span>
+                    <span className="opacity-60 truncate">
+                      {sortedEntries.length === 0
+                        ? "— Trash is empty"
+                        : selectedPaths.length > 0
+                        ? `— ${selectedPaths.length} of ${sortedEntries.length} item(s) selected`
+                        : `— ${sortedEntries.length} ${
+                            sortedEntries.length === 1 ? "item" : "items"
+                          }`}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {selectedPaths.length > 0 && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleRestoreTrash()}
+                          title="Restore selected item(s) to their original locations"
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
+                            darkMode
+                              ? "bg-white/10 hover:bg-white/15 text-zinc-100"
+                              : "bg-white hover:bg-zinc-100 text-zinc-800 border border-black/10 shadow-2xs"
+                          }`}
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-[#0a84ff]" />
+                          <span>Put Back</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePermanently()}
+                          title="Delete selected item(s) permanently (Del)"
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
+                            darkMode
+                              ? "bg-[#ff453a]/15 hover:bg-[#ff453a]/25 text-[#ff6961] border border-[#ff453a]/30"
+                              : "bg-[#ff453a]/10 hover:bg-[#ff453a]/20 text-[#d70015] border border-[#ff453a]/25"
+                          }`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Delete Permanently…</span>
+                        </button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      disabled={sortedEntries.length === 0}
+                      onClick={() => void handleRestoreAllTrash()}
+                      title="Restore all items in Trash to their original locations"
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
+                        darkMode
+                          ? "bg-white/10 hover:bg-white/15 text-zinc-100"
+                          : "bg-white hover:bg-zinc-100 text-zinc-800 border border-black/10 shadow-2xs"
+                      }`}
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-[#0a84ff]" />
+                      <span>Restore All</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={sortedEntries.length === 0}
+                      onClick={() => void handleEmptyTrash()}
+                      title="Permanently delete all items in Trash"
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium bg-[#ff453a] hover:bg-[#e0352b] text-white transition shadow-2xs cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Empty Trash…</span>
+                    </button>
+                  </div>
+                </div>
+              )}
               {viewMode === "icons" && <IconView {...commonViewProps} />}
               {viewMode === "list" && <ListView {...commonViewProps} />}
               {viewMode === "columns" && (
@@ -3950,7 +4438,77 @@ export const App: React.FC = () => {
         onFormatVolume={setFormatVolume}
         onFirstAidVolume={setFirstAidVolume}
         onToast={showToast}
+        isTrashView={activeTab?.path === "__TRASH__" && !activeTab?.activeTag}
+        onRestoreTrash={(entry) => void handleRestoreTrash(entry)}
+        onRestoreAllTrash={() => void handleRestoreAllTrash()}
+        onDeletePermanently={handleDeletePermanently}
+        onEmptyTrash={() => void handleEmptyTrash()}
+        trashEmpty={activeTab?.path === "__TRASH__" && sortedEntries.length === 0}
       />
+
+      {/* Empty Trash / Delete Permanently Confirmation Modal */}
+      {trashConfirmModal && (
+        <div
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setTrashConfirmModal(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-xs p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className={`w-full max-w-sm rounded-2xl border shadow-2xl p-5 flex flex-col gap-4 backdrop-blur-2xl text-xs select-none ${
+              darkMode
+                ? "bg-[#26262b]/95 border-white/15 text-zinc-100"
+                : "bg-white/95 border-black/15 text-zinc-900"
+            }`}
+          >
+            <div className="flex items-start gap-3.5">
+              <div className="w-10 h-10 rounded-xl bg-[#ff453a]/15 border border-[#ff453a]/30 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5 text-[#ff453a]" />
+              </div>
+              <div className="flex-1 min-w-0 space-y-1">
+                <h3 className="font-semibold text-sm leading-snug">
+                  {trashConfirmModal.mode === "empty"
+                    ? "Are you sure you want to permanently erase the items in the Trash?"
+                    : `Are you sure you want to permanently delete ${
+                        trashConfirmModal.count === 1
+                          ? "this item"
+                          : `${trashConfirmModal.count} items`
+                      }?`}
+                </h3>
+                <p className="opacity-65 text-xs leading-relaxed">
+                  {trashConfirmModal.mode === "empty"
+                    ? `All ${trashConfirmModal.count} item(s) in the Trash will be permanently deleted. You can’t undo this action.`
+                    : "The selected item(s) will be deleted immediately and permanently. You can’t undo this action."}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setTrashConfirmModal(null)}
+                className={`px-3.5 py-1.5 rounded-lg font-medium transition cursor-pointer ${
+                  darkMode
+                    ? "bg-white/10 hover:bg-white/15 text-zinc-200"
+                    : "bg-black/5 hover:bg-black/10 text-zinc-700"
+                }`}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => void confirmTrashAction()}
+                className="px-3.5 py-1.5 rounded-lg font-semibold bg-[#ff453a] hover:bg-[#e0352b] text-white transition shadow-sm cursor-pointer"
+              >
+                {trashConfirmModal.mode === "empty"
+                  ? "Empty Trash"
+                  : "Delete Immediately"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Format / Erase Modal (macOS Disk Utility Style) */}
       <FormatModal

@@ -15,6 +15,8 @@ export interface FileEntry {
   childCount?: number | null;
   tags: string[];
   defaultApp?: string | null;
+  originalPath?: string | null;
+  deletedAt?: number | null;
 }
 
 export interface ArchiveEntryInfo {
@@ -48,6 +50,8 @@ export interface VolumeInfo {
 export interface SidebarData {
   homeDir: string;
   osName?: string;
+  isRoot?: boolean;
+  needsSudoElevation?: boolean;
   favorites: UserDirectory[];
   volumes: VolumeInfo[];
   tags: Record<string, string[]>;

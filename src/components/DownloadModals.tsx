@@ -132,7 +132,7 @@ export const DownloadPromptModal: React.FC<DownloadPromptModalProps> = ({
     {
       id: "current",
       name: "Current Folder",
-      path: currentPath && currentPath !== "__RECENTS__" ? currentPath : defaultDownloadsDir,
+      path: currentPath && currentPath !== "__RECENTS__" && currentPath !== "__TRASH__" ? currentPath : defaultDownloadsDir,
       icon: Folder,
     },
     ...(defaultDownloadsDir
@@ -639,7 +639,7 @@ export const DownloadSaveBar: React.FC<DownloadSaveBarProps> = ({
   }, [download.id, download.filename]);
 
   const effectiveDestination =
-    currentPath && currentPath !== "__RECENTS__"
+    currentPath && currentPath !== "__RECENTS__" && currentPath !== "__TRASH__"
       ? currentPath
       : defaultDownloadsDir || "~/Downloads";
 
