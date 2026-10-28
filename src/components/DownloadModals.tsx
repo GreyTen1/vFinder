@@ -13,11 +13,9 @@ import {
   Search,
   X,
   Plus,
-  Trash2,
   Globe,
   CheckCircle2,
   AlertCircle,
-  HardDrive,
   Monitor,
 } from "lucide-react";
 import {

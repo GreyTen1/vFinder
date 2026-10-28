@@ -19,12 +19,6 @@ export interface FileEntry {
   deletedAt?: number | null;
 }
 
-export interface ArchiveEntryInfo {
-  name: string;
-  isDir: boolean;
-  size: number;
-}
-
 export interface UserDirectory {
   id: string;
   name: string;

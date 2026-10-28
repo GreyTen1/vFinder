@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ArchiveEntryInfo, FileEntry, FilePreview, FormatTypeOption, SidebarData, InterceptedDownload } from "./types";
+import { FileEntry, FilePreview, FormatTypeOption, SidebarData, InterceptedDownload } from "./types";
 
 const isTauri = () =>
   typeof window !== "undefined" &&
@@ -190,10 +190,6 @@ export async function apiCompressItems(paths: string[]): Promise<string> {
   return invoke<string>("compress_items", { paths });
 }
 
-export async function apiReadArchiveContents(path: string): Promise<ArchiveEntryInfo[]> {
-  return invoke<ArchiveEntryInfo[]>("read_archive_contents", { path });
-}
-
 export async function apiExtractArchive(path: string): Promise<string> {
   return invoke<string>("extract_archive", { path });
 }
@@ -215,13 +211,11 @@ export async function apiOpenItemWith(
 
 export async function apiSetDefaultApp(
   path: string,
-  program: string,
-  applyToExtension = false
+  program: string
 ): Promise<string | null> {
   return invoke<string | null>("set_default_app", {
     path,
     program,
-    applyToExtension,
   });
 }
 
@@ -344,10 +338,6 @@ export async function apiCheckPartition(
     device,
     password: password ?? null,
   });
-}
-
-export async function apiSetWebviewZoom(scale = 1.0): Promise<void> {
-  return invoke<void>("set_webview_zoom", { scale });
 }
 
 export async function apiArmExternalDrag(paths: string[]): Promise<void> {

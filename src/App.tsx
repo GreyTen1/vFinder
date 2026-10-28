@@ -1564,9 +1564,7 @@ export const App: React.FC = () => {
             showToast(`${err}`);
           }
         }
-        if (dirs.length === 1 && files.length === 0) {
-          navigateTo(dirs[0].path, dirs[0].name);
-        } else if (dirs.length > 0 && files.length === 0) {
+        if (dirs.length > 0 && files.length === 0) {
           navigateTo(dirs[0].path, dirs[0].name);
         }
         return;
@@ -2042,11 +2040,7 @@ export const App: React.FC = () => {
   const handleSetDefaultApp = useCallback(
     async (path: string, program: string, applyToExtension: boolean) => {
       try {
-        const updatedApp = await apiSetDefaultApp(
-          path,
-          program,
-          applyToExtension
-        );
+        const updatedApp = await apiSetDefaultApp(path, program);
         await loadCurrentEntries(true);
         setGetInfoEntry((prev) =>
           prev && prev.path === path
@@ -3784,47 +3778,14 @@ export const App: React.FC = () => {
     toggleSidebar,
   ]);
 
-  // Global prevention for trackpad pinch-to-zoom and WebKit context menu
+  // Global prevention for WebKit context menu (pinch/zoom is handled in index.html + native WebKitGTK)
   useEffect(() => {
     const handleGlobalContextMenu = (e: MouseEvent) => {
       e.preventDefault();
     };
-    const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-      }
-    };
-    const handleTouch = (e: TouchEvent) => {
-      if (e.touches && e.touches.length > 1) {
-        e.preventDefault();
-      }
-    };
-    const handleGesture = (e: Event) => {
-      e.preventDefault();
-    };
-
     window.addEventListener("contextmenu", handleGlobalContextMenu);
-    window.addEventListener("wheel", handleWheel, { passive: false, capture: true });
-    document.addEventListener("wheel", handleWheel, { passive: false, capture: true });
-    window.addEventListener("touchstart", handleTouch, { passive: false, capture: true });
-    window.addEventListener("touchmove", handleTouch, { passive: false, capture: true });
-    document.addEventListener("touchstart", handleTouch, { passive: false, capture: true });
-    document.addEventListener("touchmove", handleTouch, { passive: false, capture: true });
-    window.addEventListener("gesturestart", handleGesture, { passive: false, capture: true });
-    window.addEventListener("gesturechange", handleGesture, { passive: false, capture: true });
-    window.addEventListener("gestureend", handleGesture, { passive: false, capture: true });
-
     return () => {
       window.removeEventListener("contextmenu", handleGlobalContextMenu);
-      window.removeEventListener("wheel", handleWheel, { capture: true });
-      document.removeEventListener("wheel", handleWheel, { capture: true });
-      window.removeEventListener("touchstart", handleTouch, { capture: true });
-      window.removeEventListener("touchmove", handleTouch, { capture: true });
-      document.removeEventListener("touchstart", handleTouch, { capture: true });
-      document.removeEventListener("touchmove", handleTouch, { capture: true });
-      window.removeEventListener("gesturestart", handleGesture, { capture: true });
-      window.removeEventListener("gesturechange", handleGesture, { capture: true });
-      window.removeEventListener("gestureend", handleGesture, { capture: true });
     };
   }, []);
 

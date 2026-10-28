@@ -20,7 +20,6 @@ import {
   Plus,
   X,
   ArrowUpDown,
-  Check,
   RefreshCw,
   Download,
   Minus,
@@ -1170,7 +1169,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             );
             return (
           <div
-            className="absolute bottom-0 top-0 z-20 flex items-end"
+            className="absolute bottom-0 top-0 z-20 flex items-end pl-3"
             style={{ left: `${splitTabLeft}px`, right: 0 }}
           >
             <div

@@ -10,7 +10,6 @@ import {
   Film,
   HardDrive,
   Folder,
-  ChevronDown,
   ChevronRight,
   Usb,
   Disc,

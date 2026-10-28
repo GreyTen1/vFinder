@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
-  ChevronDown,
   ExternalLink,
   Eye,
 } from "lucide-react";
@@ -182,13 +181,6 @@ export function useMarqueeSelection({
       const sTop = c.scrollTop;
       const nodes = c.querySelectorAll<HTMLElement>("[data-entry-path]");
       const itemsByPath = new Map(previousItems.map((item) => [item.path, item]));
-      const list: {
-        path: string;
-        left: number;
-        top: number;
-        right: number;
-        bottom: number;
-      }[] = [];
       nodes.forEach((node) => {
         const p = node.getAttribute("data-entry-path");
         if (!p) return;

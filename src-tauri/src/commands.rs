@@ -1,6 +1,6 @@
 use crate::models::{
     FileEntry, FilePreview, FormatTypeOption, OpenWithConfig, SidebarData, UserDirectory,
-    ArchiveEntryInfo, VolumeInfo,
+    VolumeInfo,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
@@ -143,9 +143,6 @@ struct LsblkDevice {
     model: Option<String>,
     vendor: Option<String>,
     tran: Option<String>,
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    dev_type: Option<String>,
     #[serde(default)]
     children: Vec<LsblkDevice>,
 }
@@ -2139,59 +2136,6 @@ pub async fn compress_items(paths: Vec<String>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn read_archive_contents(path: String) -> Result<Vec<ArchiveEntryInfo>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let archive_path = Path::new(&path);
-        if archive_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.to_lowercase().ends_with(".zip"))
-            .unwrap_or(false)
-        {
-            let file = fs::File::open(&path)
-                .map_err(|error| format!("Could not open ZIP archive: {error}"))?;
-            let mut archive = zip::ZipArchive::new(file)
-                .map_err(|error| format!("Could not read ZIP archive: {error}"))?;
-            let mut entries = Vec::with_capacity(archive.len());
-            for index in 0..archive.len() {
-                let entry = archive
-                    .by_index(index)
-                    .map_err(|error| format!("Could not read ZIP entry: {error}"))?;
-                entries.push(ArchiveEntryInfo {
-                    name: entry.name().to_string(),
-                    is_dir: entry.is_dir(),
-                    size: entry.size(),
-                });
-            }
-            return Ok(entries);
-        }
-
-        let reader = open_tarball_reader(archive_path)?;
-        let mut archive = tar::Archive::new(reader);
-        let archive_entries = archive
-            .entries()
-            .map_err(|error| format!("Could not read TAR archive: {error}"))?;
-        let mut entries = Vec::new();
-        for entry in archive_entries {
-            let entry = entry.map_err(|error| format!("Could not read TAR entry: {error}"))?;
-            let name = entry
-                .path()
-                .map_err(|error| format!("Could not read TAR entry path: {error}"))?
-                .to_string_lossy()
-                .into_owned();
-            entries.push(ArchiveEntryInfo {
-                name,
-                is_dir: entry.header().entry_type().is_dir(),
-                size: entry.size(),
-            });
-        }
-        Ok(entries)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
 pub async fn extract_archive(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let archive_path = PathBuf::from(&path);
@@ -2778,7 +2722,6 @@ pub async fn open_item_with(path: String, program: String) -> Result<(), String>
 pub async fn set_default_app(
     path: String,
     program: String,
-    #[allow(unused_variables)] apply_to_extension: Option<bool>,
 ) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let p = Path::new(&path);
@@ -3339,11 +3282,6 @@ pub async fn set_file_executable(path: String, executable: bool) -> Result<(), S
     })
     .await
     .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-pub async fn set_webview_zoom(window: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
-    window.set_zoom(scale).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

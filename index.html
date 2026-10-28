@@ -25,7 +25,6 @@
           }
         }
         window.addEventListener("wheel", blockPinch, { passive: false, capture: true });
-        document.addEventListener("wheel", blockPinch, { passive: false, capture: true });
 
         function blockMultiTouch(e) {
           if (e.touches && e.touches.length > 1) {
@@ -34,8 +33,6 @@
         }
         window.addEventListener("touchstart", blockMultiTouch, { passive: false, capture: true });
         window.addEventListener("touchmove", blockMultiTouch, { passive: false, capture: true });
-        document.addEventListener("touchstart", blockMultiTouch, { passive: false, capture: true });
-        document.addEventListener("touchmove", blockMultiTouch, { passive: false, capture: true });
 
         function blockGesture(e) {
           e.preventDefault();

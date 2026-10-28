@@ -1,6 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  X,
   ExternalLink,
   FolderPlus,
   FilePlus,
@@ -35,7 +34,6 @@ import {
   TAG_COLORS,
   ViewMode,
   VolumeInfo,
-  ArchiveEntryInfo,
   formatBytes,
   formatMacDate,
 } from "../types";
@@ -44,7 +42,6 @@ import {
   apiReadFilePreview,
   apiGetFilePreviewUrl,
   apiGetAvailableFormatTypes,
-  apiReadArchiveContents,
 } from "../api";
 import { useToolbarOutsideDismiss } from "./useToolbarOutsideDismiss";
 
@@ -677,144 +674,6 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
           </div>
         </div>
       </div>
-    </div>
-  );
-};
-
-interface ArchiveContentsModalProps {
-  archivePath: string | null;
-  onClose: () => void;
-  onExtract: (archivePath: string) => void;
-  darkMode: boolean;
-}
-
-export const ArchiveContentsModal: React.FC<ArchiveContentsModalProps> = ({
-  archivePath,
-  onClose,
-  onExtract,
-  darkMode,
-}) => {
-  const [entries, setEntries] = useState<ArchiveEntryInfo[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!archivePath) return;
-    let cancelled = false;
-    setEntries([]);
-    setError(null);
-    setLoading(true);
-    apiReadArchiveContents(archivePath)
-      .then((result) => {
-        if (!cancelled) setEntries(result);
-      })
-      .catch((reason) => {
-        if (!cancelled) setError(String(reason));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [archivePath]);
-
-  if (!archivePath) return null;
-  const archiveName = archivePath.split(/[\\/]/).pop() || archivePath;
-  const visibleEntries = entries.slice(0, 500);
-
-  return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 backdrop-blur-xs p-6"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Archive contents: ${archiveName}`}
-        className={`flex max-h-[min(720px,90vh)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border shadow-2xl ${
-          darkMode
-            ? "border-white/15 bg-[#242428] text-zinc-100"
-            : "border-black/10 bg-white text-zinc-900"
-        }`}
-      >
-        <header className="flex items-center gap-3 border-b border-current/10 px-5 py-4">
-          <Archive className="h-5 w-5 shrink-0 text-[#0a84ff]" />
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-sm font-semibold">{archiveName}</h2>
-            <p className="mt-0.5 text-xs opacity-55">
-              {loading ? "Reading archive…" : `${entries.length} items`}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close archive"
-            className="rounded-lg p-2 opacity-60 hover:bg-current/10 hover:opacity-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div className="min-h-0 flex-1 overflow-auto p-3">
-          {loading ? (
-            <div className="flex items-center justify-center gap-2 py-12 text-sm opacity-60">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Reading archive contents…
-            </div>
-          ) : error ? (
-            <p className="px-3 py-8 text-center text-sm text-[#ff453a]">{error}</p>
-          ) : entries.length === 0 ? (
-            <p className="px-3 py-8 text-center text-sm opacity-55">This archive is empty.</p>
-          ) : (
-            <div className="space-y-0.5">
-              {visibleEntries.map((entry, index) => (
-                <div
-                  key={`${entry.name}-${index}`}
-                  className="flex items-center gap-3 rounded-lg px-3 py-2 text-xs hover:bg-current/5"
-                >
-                  {entry.isDir ? (
-                    <Folder className="h-4 w-4 shrink-0 text-[#0a84ff]" />
-                  ) : (
-                    <FilePlus className="h-4 w-4 shrink-0 opacity-45" />
-                  )}
-                  <span className="min-w-0 flex-1 break-all">{entry.name}</span>
-                  {!entry.isDir && (
-                    <span className="shrink-0 tabular-nums opacity-50">
-                      {formatBytes(entry.size)}
-                    </span>
-                  )}
-                </div>
-              ))}
-              {entries.length > visibleEntries.length && (
-                <p className="px-3 py-2 text-center text-[11px] opacity-50">
-                  Showing the first {visibleEntries.length} of {entries.length} items
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-
-        <footer className="flex justify-end gap-2 border-t border-current/10 px-5 py-4">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg px-3 py-2 text-xs opacity-70 hover:bg-current/10"
-          >
-            Close
-          </button>
-          <button
-            type="button"
-            disabled={loading || Boolean(error)}
-            onClick={() => onExtract(archivePath)}
-            className="rounded-lg bg-[#0a84ff] px-3 py-2 text-xs font-medium text-white hover:bg-[#0077ed] disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            Extract to Folder
-          </button>
-        </footer>
-      </section>
     </div>
   );
 };

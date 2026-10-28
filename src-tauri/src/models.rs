@@ -26,14 +26,6 @@ pub struct FileEntry {
     pub deleted_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArchiveEntryInfo {
-    pub name: String,
-    pub is_dir: bool,
-    pub size: u64,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenWithConfig {

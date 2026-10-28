@@ -73,16 +73,6 @@ pub fn has_pending_downloads_for_window(window_label: &str) -> bool {
     false
 }
 
-#[allow(dead_code)]
-pub fn add_pending_download(payload: InterceptedDownloadPayload) {
-    add_pending_download_for_window("main", payload);
-}
-
-#[allow(dead_code)]
-pub fn take_pending_downloads() -> Vec<InterceptedDownloadPayload> {
-    take_pending_downloads_for_window("main")
-}
-
 pub fn activate_window_cross_desktop(window: &tauri::WebviewWindow) {
     let _ = window.unminimize();
     let _ = window.show();
@@ -97,18 +87,18 @@ pub fn activate_window_cross_desktop(window: &tauri::WebviewWindow) {
 
         if is_hyprland {
             let _ = std::process::Command::new("hyprctl")
-                .args(["dispatch", "focuswindow", "class:^(finder)$"])
+                .args(["dispatch", "focuswindow", "class:^(vfinder|vFinder|finder)$"])
                 .output();
             let _ = std::process::Command::new("hyprctl")
-                .args(["dispatch", "alterzorder", "top,class:^(finder)$"])
+                .args(["dispatch", "alterzorder", "top,class:^(vfinder|vFinder|finder)$"])
                 .output();
         } else if is_sway {
             let _ = std::process::Command::new("swaymsg")
-                .args(["[app_id=\"(?i)finder\"] focus"])
+                .args(["[app_id=\"(?i)(vfinder|finder)\"] focus"])
                 .output();
         } else if is_i3 {
             let _ = std::process::Command::new("i3-msg")
-                .args(["[class=\"(?i)finder\"] focus"])
+                .args(["[class=\"(?i)(vfinder|finder)\"] focus"])
                 .output();
         } else {
             // Generic X11 / Xwayland focus helpers (GNOME X11, KDE X11, XFCE, Cinnamon, MATE, LXQt, etc.)
@@ -119,7 +109,7 @@ pub fn activate_window_cross_desktop(window: &tauri::WebviewWindow) {
                 .unwrap_or(false);
             if has_wmctrl {
                 let _ = std::process::Command::new("wmctrl")
-                    .args(["-x", "-a", "finder"])
+                    .args(["-x", "-a", "vfinder"])
                     .output();
             } else {
                 let has_xdotool = std::process::Command::new("which")
@@ -129,7 +119,7 @@ pub fn activate_window_cross_desktop(window: &tauri::WebviewWindow) {
                     .unwrap_or(false);
                 if has_xdotool {
                     let _ = std::process::Command::new("xdotool")
-                        .args(["search", "--class", "finder", "windowactivate"])
+                        .args(["search", "--class", "vfinder", "windowactivate"])
                         .output();
                 }
             }
