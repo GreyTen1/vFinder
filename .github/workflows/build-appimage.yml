@@ -39,13 +39,11 @@ jobs:
       - name: Install npm packages
         run: npm ci
 
-      - name: Build AppImage and Deb
-        run: npx tauri build
+      - name: Build AppImage
+        run: npx tauri build --bundles appimage
 
-      - name: Upload AppImage and Deb as Artifacts
+      - name: Upload AppImage Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vFinder-Linux-Build
-          path: |
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/deb/*.deb
+          name: vFinder-AppImage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
