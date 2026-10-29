@@ -749,6 +749,16 @@ pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        // Disable FreeType stem darkening on Linux.
+        // WebKitGTK/Cairo on older distros (like Ubuntu 22.04) otherwise applies aggressive
+        // artificial stem thickening on dark backgrounds, making normal text appear bold.
+        if std::env::var_os("FREETYPE_PROPERTIES").is_none() {
+            std::env::set_var("FREETYPE_PROPERTIES", "cff:no-stem-darkening=1 autofitter:no-stem-darkening=1");
+        }
+    }
+
     #[cfg(unix)]
     handle_sudo_flag_and_root_env();
 
