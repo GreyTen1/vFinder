@@ -421,6 +421,16 @@ export async function apiGetPendingDownloads(): Promise<InterceptedDownload[]> {
   return [];
 }
 
+export async function apiPlaySoundEffect(name: string): Promise<void> {
+  if (isTauri()) {
+    try {
+      await invoke("play_sound_effect", { name });
+    } catch {
+      // Ignore background audio failures
+    }
+  }
+}
+
 
 
 

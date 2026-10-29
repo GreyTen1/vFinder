@@ -851,6 +851,7 @@ fn main() {
             commands::cancel_download,
             commands::get_default_downloads_dir,
             commands::get_pending_downloads,
+            commands::play_sound_effect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running vFinder application");

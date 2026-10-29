@@ -3435,6 +3435,68 @@ pub fn get_pending_downloads(window: tauri::WebviewWindow) -> Result<Vec<crate::
     Ok(crate::download_server::take_pending_downloads_for_window(window.label()))
 }
 
+static AUDIO_EMPTY_TRASH: &[u8] = include_bytes!("../audio-assets/empty-trash.ogg");
+static AUDIO_FILE_TRASH: &[u8] = include_bytes!("../audio-assets/file-trash.ogg");
+static AUDIO_MOVE_COPY: &[u8] = include_bytes!("../audio-assets/move-copy.ogg");
+
+#[tauri::command]
+pub fn play_sound_effect(name: String) -> Result<(), String> {
+    std::thread::spawn(move || {
+        let bytes: &[u8] = match name.as_str() {
+            "empty-trash" => AUDIO_EMPTY_TRASH,
+            "file-trash" => AUDIO_FILE_TRASH,
+            "move-copy" => AUDIO_MOVE_COPY,
+            _ => return,
+        };
+
+        let temp_dir = std::env::temp_dir().join("vfinder-audio");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let temp_file = temp_dir.join(format!("{name}.ogg"));
+
+        // Only write if not already existing or size differs
+        let needs_write = match std::fs::metadata(&temp_file) {
+            Ok(meta) => meta.len() != bytes.len() as u64,
+            Err(_) => true,
+        };
+        if needs_write {
+            let _ = std::fs::write(&temp_file, bytes);
+        }
+
+        // Try canberra-gtk-play first (standard desktop sound provider on Linux/GNOME/GTK)
+        if Command::new("canberra-gtk-play")
+            .arg(format!("--file={}", temp_file.display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        // Fallback: pw-play (PipeWire)
+        if Command::new("pw-play")
+            .arg(&temp_file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        // Fallback: paplay (PulseAudio)
+        let _ = Command::new("paplay")
+            .arg(&temp_file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

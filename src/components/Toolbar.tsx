@@ -1044,17 +1044,17 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               role="tab"
               aria-selected={isActive}
               tabIndex={isActive ? 0 : -1}
-              className={`group relative flex min-w-[88px] flex-[1_1_220px] items-center gap-1.5 pl-3 pr-1.5 h-8 rounded-t-2xl rounded-b-none ${isActive ? `workspace-tab-active ${darkMode ? (isArchiveWorkspace ? "workspace-tab-active-archive-dark" : "workspace-tab-active-dark") : (isArchiveWorkspace ? "workspace-tab-active-archive-light" : "workspace-tab-active-light")} z-20 translate-y-[2px]` : "translate-y-[1px]"} ${draggingTabId === tab.id ? "cursor-grabbing opacity-30" : "cursor-default"} transition-colors duration-150 max-w-[260px] border select-none ${
+              className={`group relative flex min-w-[88px] flex-[1_1_220px] items-center gap-1.5 pl-3 pr-1.5 h-8 rounded-t-2xl rounded-b-none ${isActive ? `workspace-tab-active ${darkMode ? (isArchiveWorkspace ? "workspace-tab-active-archive-dark" : "workspace-tab-active-dark") : (isArchiveWorkspace ? "workspace-tab-active-archive-light" : "workspace-tab-active-light")} z-20 translate-y-[2px]` : "translate-y-[1px] border"} ${draggingTabId === tab.id ? "cursor-grabbing opacity-30" : "cursor-default"} transition-colors duration-150 max-w-[260px] select-none ${
                 isDropTarget
-                  ? "border-[#0a84ff]/70 bg-[#0a84ff]/20 text-white shadow-sm"
+                  ? "border border-[#0a84ff]/70 bg-[#0a84ff]/20 text-white shadow-sm"
                   : isActive
                   ? darkMode
                     ? isArchiveWorkspace
-                      ? "border-[#4f4c71] border-b-0 bg-[#29273a] text-white"
-                      : "border-[#36363a] border-b-0 bg-[#202024] text-white"
+                      ? "bg-[#29273a] text-white"
+                      : "bg-[#202024] text-white"
                     : isArchiveWorkspace
-                      ? "border-[#cecbe7] border-b-0 bg-[#efedf8] text-zinc-900"
-                      : "border-[#dadadd] border-b-0 bg-[#f2f2f5] text-zinc-900"
+                      ? "bg-[#efedf8] text-zinc-900"
+                      : "bg-[#f2f2f5] text-zinc-900"
                   : darkMode
                   ? isArchiveWorkspace
                     ? "border-[#9692D6]/10 bg-[#9692D6]/[0.07] text-zinc-300 hover:bg-[#9692D6]/[0.13] hover:text-zinc-100"
@@ -1175,14 +1175,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             <div
               ref={splitTabElementRef}
               key={splitTab.id}
-              className={`workspace-tab-active ${darkMode ? (splitIsArchiveWorkspace ? "workspace-tab-active-archive-dark" : "workspace-tab-active-dark") : (splitIsArchiveWorkspace ? "workspace-tab-active-archive-light" : "workspace-tab-active-light")} group relative z-20 flex h-8 min-w-[88px] flex-[1_1_220px] max-w-[260px] translate-y-[2px] items-center gap-1.5 rounded-t-2xl rounded-b-none border pl-3 pr-1.5 text-[11px] font-medium ${
+              className={`workspace-tab-active ${darkMode ? (splitIsArchiveWorkspace ? "workspace-tab-active-archive-dark" : "workspace-tab-active-dark") : (splitIsArchiveWorkspace ? "workspace-tab-active-archive-light" : "workspace-tab-active-light")} group relative z-20 flex h-8 min-w-[88px] flex-[1_1_220px] max-w-[260px] translate-y-[2px] items-center gap-1.5 rounded-t-2xl rounded-b-none pl-3 pr-1.5 text-[11px] font-medium ${
                 darkMode
                   ? splitIsArchiveWorkspace
-                    ? "border-[#4f4c71] border-b-0 bg-[#29273a] text-white"
-                    : "border-[#36363a] border-b-0 bg-[#202024] text-white"
+                    ? "bg-[#29273a] text-white"
+                    : "bg-[#202024] text-white"
                   : splitIsArchiveWorkspace
-                    ? "border-[#cecbe7] border-b-0 bg-[#efedf8] text-zinc-900"
-                    : "border-[#dadadd] border-b-0 bg-[#f2f2f5] text-zinc-900"
+                    ? "bg-[#efedf8] text-zinc-900"
+                    : "bg-[#f2f2f5] text-zinc-900"
               }`}
               role="tab"
               aria-selected="true"

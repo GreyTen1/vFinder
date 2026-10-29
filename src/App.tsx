@@ -63,6 +63,7 @@ import {
   apiGetPendingDownloads,
 } from "./api";
 import { Toolbar } from "./components/Toolbar";
+import { playSound } from "./sound";
 import { SplitExplorerPane } from "./components/SplitExplorerPane";
 import { Sidebar } from "./components/Sidebar";
 import { FileIcon } from "./components/FileIcon";
@@ -936,6 +937,7 @@ export const App: React.FC = () => {
           restoredPaths.push(...(await apiMoveItems(paths, parent)));
         }
       });
+      playSound("move-copy");
       undoStackRef.current.pop();
       await loadCurrentEntries(true);
       setSplitPaneRefreshVersion((version) => version + 1);
@@ -1763,6 +1765,7 @@ export const App: React.FC = () => {
           }
         );
         await loadCurrentEntries(true);
+        playSound("move-copy");
         setSelectedPaths(createdPaths);
         showToast(
           targets.length === 1
@@ -1822,6 +1825,7 @@ export const App: React.FC = () => {
         await runWithActivity(`Moving ${targets.length} item(s) to Trash...`, () =>
           apiTrashItems(targets)
         );
+        playSound("file-trash");
         setSelectedPaths([]);
         await loadCurrentEntries(true);
         showToast(`Moved ${targets.length} item(s) to Trash`);
@@ -1914,6 +1918,7 @@ export const App: React.FC = () => {
     try {
       if (modal.mode === "empty") {
         await runWithActivity("Emptying Trash...", () => apiEmptyTrash());
+        playSound("empty-trash");
         setSelectedPaths([]);
         await loadCurrentEntries(true);
         setSplitPaneRefreshVersion((version) => version + 1);
@@ -1923,6 +1928,7 @@ export const App: React.FC = () => {
           `Permanently deleting ${modal.paths.length} item(s)...`,
           () => apiDeleteTrashItemsPermanently(modal.paths!)
         );
+        playSound("empty-trash");
         setSelectedPaths([]);
         await loadCurrentEntries(true);
         setSplitPaneRefreshVersion((version) => version + 1);
@@ -1980,6 +1986,7 @@ export const App: React.FC = () => {
               return result;
             }
           );
+          playSound("move-copy");
           setSelectedPaths(created);
           setClipboard((current) => (current === clipboard ? null : current));
           showToast(`Pasted ${created.length} item(s)`);
@@ -1992,6 +1999,7 @@ export const App: React.FC = () => {
               return result;
             }
           );
+          playSound("move-copy");
           recordMoveUndo(clipboard.paths, moved);
           setSelectedPaths(moved);
           setClipboard((current) => (current === clipboard ? null : current));
@@ -2411,6 +2419,7 @@ export const App: React.FC = () => {
                   await loadCurrentEntries(true);
                 }
               );
+              playSound("file-trash");
               setSelectedPaths([]);
               if (startedInSplitPane || droppedIntoSplitPane) {
                 setSplitPaneRefreshVersion((version) => version + 1);
@@ -2431,6 +2440,7 @@ export const App: React.FC = () => {
                   return result;
                 }
               );
+              playSound("move-copy");
               if (startedInSplitPane || droppedIntoSplitPane) {
                 setSplitPaneRefreshVersion((version) => version + 1);
               }
@@ -2451,6 +2461,7 @@ export const App: React.FC = () => {
                     return result;
                   }
                 );
+                playSound("move-copy");
                 recordMoveUndo(sourcesToMove, moved);
                 setSelectedPaths([]);
                 if (startedInSplitPane || droppedIntoSplitPane) {
@@ -2700,6 +2711,7 @@ export const App: React.FC = () => {
                   await loadCurrentEntries(true);
                 }
               );
+              playSound("file-trash");
               showToast(`Moved ${droppedPaths.length} item(s) to Trash`);
             } catch (err) {
               showToast(`${err}`);
@@ -2725,6 +2737,7 @@ export const App: React.FC = () => {
                   return result;
                 }
               );
+              playSound("move-copy");
               recordMoveUndo(validSources, moved);
               if (destDir === activeTabRef.current?.path) {
                 setSelectedPaths(moved);
@@ -2741,6 +2754,7 @@ export const App: React.FC = () => {
                   return result;
                 }
               );
+              playSound("move-copy");
               if (destDir === activeTabRef.current?.path) {
                 setSelectedPaths(copied);
               }

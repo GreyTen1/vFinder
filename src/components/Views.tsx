@@ -1027,6 +1027,7 @@ export const ListView: React.FC<CommonViewProps> = ({
   );
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [dirCache, setDirCache] = useState<Record<string, FileEntry[]>>({});
   const [scrollTop, setScrollTop] = useState(0);
@@ -1209,6 +1210,11 @@ export const ListView: React.FC<CommonViewProps> = ({
   }, [isLargeList]);
 
   const handleListScroll = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    if (headerRef.current) {
+      headerRef.current.scrollLeft = container.scrollLeft;
+    }
     if (!isLargeList) return;
     if (scrollFrameRef.current !== null) return;
     scrollFrameRef.current = requestAnimationFrame(() => {
@@ -1249,15 +1255,14 @@ export const ListView: React.FC<CommonViewProps> = ({
     []
   );
 
-  const headerHeight = 28;
   const overscan = 12;
   const firstVisibleRow = Math.max(
     0,
-    Math.floor((scrollTop - headerHeight) / rowHeight) - overscan
+    Math.floor(scrollTop / rowHeight) - overscan
   );
   const lastVisibleRow = Math.min(
     virtualRows.length,
-    Math.ceil((scrollTop + viewportHeight - headerHeight) / rowHeight) + overscan
+    Math.ceil((scrollTop + viewportHeight) / rowHeight) + overscan
   );
   const renderedRows = isLargeList
     ? virtualRows.slice(firstVisibleRow, lastVisibleRow)
@@ -1422,28 +1427,25 @@ export const ListView: React.FC<CommonViewProps> = ({
 
   return (
     <div
-      ref={containerRef}
-      data-tab-scroll-view="list"
-      onScroll={handleListScroll}
-      onWheel={handleListWheel}
-      onMouseDown={handleContainerMouseDown}
       onDragStart={(e) => e.preventDefault()}
       onContextMenu={(e) => onContextMenu(e, undefined)}
-      className="list-view-container macos-layer-isolate relative flex-1 overflow-auto select-none min-w-0"
+      className="list-view-container macos-layer-isolate relative flex-1 flex flex-col overflow-hidden select-none min-w-0"
     >
-      <div className="w-full min-w-[640px] flex flex-col">
-        {/* Sticky Table Header */}
-        <div
-          className={`sticky top-0 z-10 flex items-center h-7 text-[11px] font-semibold border-b select-none ${
-            darkMode
-              ? isArchiveWorkspace
-                ? "bg-[#2c293c] border-[#9692D6]/20 text-zinc-300"
-                : "bg-[#202024] border-white/10 text-zinc-400"
-              : isArchiveWorkspace
-                ? "bg-[#efedf8] border-[#807bc0]/20 text-zinc-600"
-                : "bg-[#f2f2f5] border-black/10 text-zinc-500"
-          }`}
-        >
+      {/* Table Header */}
+      <div
+        ref={headerRef}
+        data-no-marquee="true"
+        className={`shrink-0 overflow-hidden border-b select-none ${
+          darkMode
+            ? isArchiveWorkspace
+              ? "bg-[#2c293c] border-[#9692D6]/20 text-zinc-300"
+              : "bg-[#202024] border-white/10 text-zinc-400"
+            : isArchiveWorkspace
+              ? "bg-[#efedf8] border-[#807bc0]/20 text-zinc-600"
+              : "bg-[#f2f2f5] border-black/10 text-zinc-500"
+        }`}
+      >
+        <div className="w-full min-w-[640px] flex items-center h-7 text-[11px] font-semibold">
           <div
             onClick={() => onChangeSort("name")}
             className="flex-1 min-w-0 pl-8 pr-3 cursor-pointer hover:opacity-100 flex items-center"
@@ -1469,85 +1471,97 @@ export const ListView: React.FC<CommonViewProps> = ({
             Kind {renderSortArrow("kind")}
           </div>
         </div>
-
-        {isLargeList ? (
-          // Only mount rows around the viewport; the spacer preserves scroll height.
-          <div
-            className="relative w-full"
-            style={{ height: virtualRows.length * rowHeight }}
-          >
-            {renderedRows.map((row) => {
-              const { entry, depth, rowIndex } = row;
-              return (
-                <div
-                  key={entry?.path || `placeholder-${rowIndex}`}
-                  className="absolute inset-x-0"
-                  style={{ top: rowIndex * rowHeight, height: rowHeight }}
-                >
-                  {entry ? (
-                    <ListViewRow
-                      entry={entry}
-                      depth={depth}
-                      rowIndex={rowIndex}
-                      rowHeight={rowHeight}
-                      rowIconSize={rowIconSize}
-                      fontSize={fontSize}
-                      isSelected={selectedSet.has(entry.path)}
-                      isRenaming={renamingPath === entry.path}
-                      isExpanded={expandedPaths.has(entry.path)}
-                      isDropTarget={entry.isDir && dropTargetPath === entry.path}
-                      isBeingDragged={draggedSet.has(entry.path)}
-                      darkMode={darkMode}
-                      renameValue={renameValue}
-                      onOpenEntry={onOpenEntry}
-                      onContextMenu={onContextMenu}
-                      onStartRowDrag={handleStartRowDrag}
-                      onToggleExpandDir={toggleExpandDir}
-                      onPrefetchDir={prefetchDir}
-                      onRenameChange={onRenameChange}
-                      onRenameSubmit={onRenameSubmit}
-                      onRenameCancel={onRenameCancel}
-                    />
-                  ) : (
-                    <div
-                      className="flex items-center text-xs opacity-40 italic select-none"
-                      style={{
-                        height: rowHeight,
-                        paddingLeft: `${depth * 18 + 34}px`,
-                      }}
-                    >
-                      {row.placeholder}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="w-full flex flex-col">
-            {entries.map((item, idx) => renderAnimatedRow(item, 0, idx))}
-          </div>
-        )}
       </div>
 
-      {entries.length === 0 && (
-        <div className="py-20 text-center opacity-40 text-sm pointer-events-none">
-          This folder is empty
+      {/* Scrollable Table Rows */}
+      <div
+        ref={containerRef}
+        data-tab-scroll-view="list"
+        onScroll={handleListScroll}
+        onWheel={handleListWheel}
+        onMouseDown={handleContainerMouseDown}
+        className="relative flex-1 min-h-0 overflow-auto min-w-0"
+      >
+        <div className="w-full min-w-[640px] flex flex-col">
+          {isLargeList ? (
+            // Only mount rows around the viewport; the spacer preserves scroll height.
+            <div
+              className="relative w-full"
+              style={{ height: virtualRows.length * rowHeight }}
+            >
+              {renderedRows.map((row) => {
+                const { entry, depth, rowIndex } = row;
+                return (
+                  <div
+                    key={entry?.path || `placeholder-${rowIndex}`}
+                    className="absolute inset-x-0"
+                    style={{ top: rowIndex * rowHeight, height: rowHeight }}
+                  >
+                    {entry ? (
+                      <ListViewRow
+                        entry={entry}
+                        depth={depth}
+                        rowIndex={rowIndex}
+                        rowHeight={rowHeight}
+                        rowIconSize={rowIconSize}
+                        fontSize={fontSize}
+                        isSelected={selectedSet.has(entry.path)}
+                        isRenaming={renamingPath === entry.path}
+                        isExpanded={expandedPaths.has(entry.path)}
+                        isDropTarget={entry.isDir && dropTargetPath === entry.path}
+                        isBeingDragged={draggedSet.has(entry.path)}
+                        darkMode={darkMode}
+                        renameValue={renameValue}
+                        onOpenEntry={onOpenEntry}
+                        onContextMenu={onContextMenu}
+                        onStartRowDrag={handleStartRowDrag}
+                        onToggleExpandDir={toggleExpandDir}
+                        onPrefetchDir={prefetchDir}
+                        onRenameChange={onRenameChange}
+                        onRenameSubmit={onRenameSubmit}
+                        onRenameCancel={onRenameCancel}
+                      />
+                    ) : (
+                      <div
+                        className="flex items-center text-xs opacity-40 italic select-none"
+                        style={{
+                          height: rowHeight,
+                          paddingLeft: `${depth * 18 + 34}px`,
+                        }}
+                      >
+                        {row.placeholder}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="w-full flex flex-col">
+              {entries.map((item, idx) => renderAnimatedRow(item, 0, idx))}
+            </div>
+          )}
         </div>
-      )}
 
-      {/* macOS Finder Rubber-Band Marquee Selection Box */}
-      {marqueeRect && (
-        <div
-          style={{
-            left: marqueeRect.left,
-            top: marqueeRect.top,
-            width: marqueeRect.width,
-            height: marqueeRect.height,
-          }}
-          className="absolute z-30 pointer-events-none border border-[#0a84ff] bg-[#0a84ff]/20 rounded-[2px]"
-        />
-      )}
+        {entries.length === 0 && (
+          <div className="py-20 text-center opacity-40 text-sm pointer-events-none">
+            This folder is empty
+          </div>
+        )}
+
+        {/* macOS Finder Rubber-Band Marquee Selection Box */}
+        {marqueeRect && (
+          <div
+            style={{
+              left: marqueeRect.left,
+              top: marqueeRect.top,
+              width: marqueeRect.width,
+              height: marqueeRect.height,
+            }}
+            className="absolute z-30 pointer-events-none border border-[#0a84ff] bg-[#0a84ff]/20 rounded-[2px]"
+          />
+        )}
+      </div>
     </div>
   );
 };

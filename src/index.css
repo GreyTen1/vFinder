@@ -123,6 +123,10 @@
 .workspace-tab-active {
   isolation: isolate;
   overflow: visible;
+  box-shadow:
+    inset 0 1px 0 0 var(--workspace-tab-border),
+    inset 1px 0 0 0 var(--workspace-tab-border),
+    inset -1px 0 0 0 var(--workspace-tab-border);
 }
 
 .workspace-tab-active::before,
@@ -137,7 +141,7 @@
 }
 
 .workspace-tab-active::before {
-  left: -12px;
+  left: -11px;
   background: radial-gradient(
     circle at 0 0,
     transparent 10.6px,
@@ -148,7 +152,7 @@
 }
 
 .workspace-tab-active::after {
-  right: -12px;
+  right: -11px;
   background: radial-gradient(
     circle at 100% 0,
     transparent 10.6px,
