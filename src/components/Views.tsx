@@ -382,7 +382,8 @@ const FAST_COLLATOR = new Intl.Collator(undefined, {
   numeric: true,
   sensitivity: "base",
 });
-const LIST_VIRTUALIZATION_THRESHOLD = 150;
+const ICON_VIRTUALIZATION_THRESHOLD = 120;
+const LIST_VIRTUALIZATION_THRESHOLD = 100;
 
 interface IconViewItemProps {
   entry: FileEntry;
@@ -641,7 +642,7 @@ export const IconView: React.FC<CommonViewProps> = ({
 
   // Temporarily render the full grid during an external reveal so the target
   // exists in the DOM and can be centered before virtualization resumes.
-  const isLargeGrid = entries.length > 300 && !revealPath;
+  const isLargeGrid = entries.length > ICON_VIRTUALIZATION_THRESHOLD && !revealPath;
   const contentWidth = Math.max(0, gridViewport.width - 40);
   const columnCount = isLargeGrid
     ? Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)))

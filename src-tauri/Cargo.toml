@@ -1,6 +1,6 @@
 [package]
 name = "vfinder"
-version = "1.0.0"
+version = "0.4.0-alpha"
 description = "vFinder File Manager"
 authors = ["vFinder Contributors"]
 edition = "2021"
