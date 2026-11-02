@@ -30,6 +30,7 @@ use tauri::window::Color;
 static STARTUP_DIRECTORY: OnceLock<Option<String>> = OnceLock::new();
 static STARTUP_SELECTION: OnceLock<Option<String>> = OnceLock::new();
 static NEEDS_GUI_SUDO_ELEVATION: AtomicBool = AtomicBool::new(false);
+static ADMIN_MODE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
 pub fn is_effective_root() -> bool {
@@ -44,8 +45,113 @@ pub fn is_effective_root() -> bool {
     false
 }
 
+pub fn is_admin_mode() -> bool {
+    ADMIN_MODE.load(Ordering::SeqCst)
+}
+
+pub fn set_admin_mode(enabled: bool) {
+    ADMIN_MODE.store(enabled, Ordering::SeqCst);
+}
+
 pub fn needs_gui_sudo_elevation() -> bool {
     NEEDS_GUI_SUDO_ELEVATION.load(Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+fn grant_xhost_root() {
+    let _ = std::process::Command::new("xhost")
+        .args(["+si:localuser:root"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(unix)]
+fn detect_default_display() -> Option<String> {
+    if let Ok(d) = std::env::var("DISPLAY") {
+        if !d.is_empty() {
+            return Some(d);
+        }
+    }
+    if std::path::Path::new("/tmp/.X11-unix/X0").exists() {
+        return Some(":0".to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir("/tmp/.X11-unix") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(num) = name.strip_prefix('X') {
+                if num.chars().all(|c| c.is_ascii_digit()) {
+                    return Some(format!(":{num}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn find_user_xauthority(home: &str, uid: &str, user: &str) -> Option<std::path::PathBuf> {
+    // 1. Explicit env var if set and exists
+    if let Ok(val) = std::env::var("XAUTHORITY") {
+        let p = std::path::PathBuf::from(val);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 2. User's home directory ~/.Xauthority
+    if !home.is_empty() {
+        let p = std::path::Path::new(home).join(".Xauthority");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 3. /home/<user>/.Xauthority
+    if !user.is_empty() {
+        let p = std::path::Path::new("/home").join(user).join(".Xauthority");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 4. /run/user/<uid>/
+    if !uid.is_empty() {
+        let user_rt = std::path::Path::new("/run/user").join(uid);
+        if user_rt.is_dir() {
+            let p1 = user_rt.join(".Xauthority");
+            if p1.exists() {
+                return Some(p1);
+            }
+            let p2 = user_rt.join("Xauthority");
+            if p2.exists() {
+                return Some(p2);
+            }
+            if let Ok(entries) = std::fs::read_dir(&user_rt) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("xauth_") || name.starts_with(".xauth") {
+                        return Some(entry.path());
+                    }
+                }
+            }
+            let p3 = user_rt.join("gdm/Xauthority");
+            if p3.exists() {
+                return Some(p3);
+            }
+        }
+    }
+
+    // 5. /run/lightdm/<user>/xauthority
+    if !user.is_empty() {
+        let p = std::path::Path::new("/run/lightdm").join(user).join("xauthority");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    None
 }
 
 #[cfg(unix)]
@@ -61,6 +167,9 @@ pub fn build_sudo_env_pairs() -> Vec<String> {
         .unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_default();
     let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+
+    // If on X11 / Xorg, authorize local root to connect to the current X display
+    grant_xhost_root();
 
     let mut pairs = vec![
         "VFINDER_SUDO_SESSION=1".to_string(),
@@ -78,6 +187,25 @@ pub fn build_sudo_env_pairs() -> Vec<String> {
     }
     if !xdg_runtime.is_empty() {
         pairs.push(format!("VFINDER_ORIGINAL_XDG_RUNTIME_DIR={xdg_runtime}"));
+    }
+
+    let is_wayland = std::env::var("WAYLAND_DISPLAY").map(|s| !s.is_empty()).unwrap_or(false)
+        || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland");
+
+    if !is_wayland {
+        if std::env::var_os("DISPLAY").is_none() {
+            if let Some(disp) = detect_default_display() {
+                pairs.push(format!("DISPLAY={disp}"));
+            }
+        }
+        if std::env::var_os("XAUTHORITY").is_none() {
+            if let Some(xauth) = find_user_xauthority(&home, &uid.to_string(), &user) {
+                pairs.push(format!("XAUTHORITY={}", xauth.to_string_lossy()));
+            }
+        }
+        if std::env::var_os("GDK_BACKEND").is_none() {
+            pairs.push("GDK_BACKEND=x11".to_string());
+        }
     }
 
     let preserved_keys = [
@@ -141,13 +269,51 @@ fn prepare_root_gui_environment() {
         .ok()
         .filter(|s| !s.is_empty() && s != "root");
 
-    if std::env::var_os("VFINDER_ORIGINAL_HOME").is_none() {
-        let resolved_home = orig_user
-            .as_deref()
-            .and_then(lookup_passwd_home)
-            .or_else(|| orig_uid.as_deref().and_then(lookup_passwd_home));
-        if let Some(home) = resolved_home {
-            std::env::set_var("VFINDER_ORIGINAL_HOME", &home);
+    let resolved_home = orig_user
+        .as_deref()
+        .and_then(lookup_passwd_home)
+        .or_else(|| orig_uid.as_deref().and_then(lookup_passwd_home));
+
+    let orig_home = std::env::var("VFINDER_ORIGINAL_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| resolved_home.clone());
+
+    if let Some(ref home) = orig_home {
+        std::env::set_var("VFINDER_ORIGINAL_HOME", home);
+    }
+
+    let is_explicit_wayland = std::env::var("WAYLAND_DISPLAY").map(|s| !s.is_empty()).unwrap_or(false)
+        || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland");
+
+    if !is_explicit_wayland {
+        // Ensure DISPLAY is set under X11
+        if std::env::var_os("DISPLAY").is_none() {
+            if let Some(disp) = detect_default_display() {
+                std::env::set_var("DISPLAY", disp);
+            }
+        }
+
+        // Ensure XAUTHORITY is resolved and available
+        let xauth_file = find_user_xauthority(
+            orig_home.as_deref().unwrap_or(""),
+            orig_uid.as_deref().unwrap_or(""),
+            orig_user.as_deref().unwrap_or(""),
+        );
+
+        if let Some(path) = xauth_file {
+            std::env::set_var("XAUTHORITY", &path);
+
+            // Copy to /root/.Xauthority as fallback for libraries that strictly look in $HOME/.Xauthority
+            let root_xauth = std::path::Path::new("/root/.Xauthority");
+            if !root_xauth.exists() {
+                let _ = std::fs::copy(&path, root_xauth);
+                let _ = std::fs::set_permissions(root_xauth, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+
+        if std::env::var_os("GDK_BACKEND").is_none() {
+            std::env::set_var("GDK_BACKEND", "x11");
         }
     }
 
@@ -164,7 +330,8 @@ fn prepare_root_gui_environment() {
     if let Some(ref user_rt) = orig_runtime_dir {
         let user_rt_path = std::path::Path::new(user_rt);
         if user_rt_path.is_dir() {
-            if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            // Only search for Wayland sockets if the session is actually Wayland
+            if is_explicit_wayland && std::env::var_os("WAYLAND_DISPLAY").is_none() {
                 if let Ok(entries) = std::fs::read_dir(user_rt_path) {
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
@@ -188,6 +355,8 @@ fn prepare_root_gui_environment() {
                         || name_str.starts_with("pipewire-")
                         || name_str == "pulse"
                         || name_str == "bus"
+                        || name_str.starts_with("xauth")
+                        || name_str.contains("authority")
                     {
                         let dst = root_rt.join(&name);
                         let _ = std::fs::remove_file(&dst);
@@ -212,34 +381,32 @@ fn handle_sudo_flag_and_root_env() {
         fn isatty(fd: i32) -> i32;
     }
     let wants_sudo = std::env::args().skip(1).any(|arg| arg == "--sudo");
-    if wants_sudo && !is_effective_root() {
-        let has_tty = unsafe { isatty(0) != 0 || isatty(1) != 0 || isatty(2) != 0 };
-        let sudo_cached = std::process::Command::new("sudo")
-            .args(["-n", "true"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+    if wants_sudo {
+        set_admin_mode(true);
+        if !is_effective_root() {
+            let has_tty = unsafe { isatty(0) != 0 || isatty(1) != 0 || isatty(2) != 0 };
+            let sudo_cached = std::process::Command::new("sudo")
+                .args(["-n", "true"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
 
-        if has_tty || sudo_cached {
-            if let Ok(exe) = std::env::current_exe() {
-                use std::os::unix::process::CommandExt;
-                let env_pairs = build_sudo_env_pairs();
-                let orig_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-                eprintln!("[vFinder] Elevating session with root privileges (--sudo)...");
-                let err = std::process::Command::new("sudo")
-                    .arg("env")
-                    .args(&env_pairs)
-                    .arg(&exe)
-                    .args(&orig_args)
-                    .exec();
-                eprintln!("[vFinder] Failed to elevate with sudo: {err}");
-                std::process::exit(1);
+            if has_tty && !sudo_cached {
+                eprintln!("[vFinder] Administrative mode requested (--sudo). Authenticating...");
+                let status = std::process::Command::new("sudo")
+                    .arg("-v")
+                    .status();
+                if status.map(|s| s.success()).unwrap_or(false) {
+                    eprintln!("[vFinder] Administrative mode authenticated successfully.");
+                } else {
+                    NEEDS_GUI_SUDO_ELEVATION.store(true, Ordering::SeqCst);
+                }
+            } else if !sudo_cached {
+                NEEDS_GUI_SUDO_ELEVATION.store(true, Ordering::SeqCst);
             }
-        } else {
-            NEEDS_GUI_SUDO_ELEVATION.store(true, Ordering::SeqCst);
         }
     }
 
