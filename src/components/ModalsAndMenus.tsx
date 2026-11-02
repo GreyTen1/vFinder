@@ -1601,14 +1601,14 @@ export const SudoPromptModal: React.FC<SudoPromptModalProps> = ({
 
         <h3 className="text-[14px] font-bold leading-snug">
           {prompt.action === "elevate"
-            ? "vFinder wants to start a Root Session"
+            ? "vFinder Administrative Privileges"
             : `vFinder wants to ${actionVerb} “${prompt.volumeName}”`}
         </h3>
         <p className="text-xs opacity-65 mt-1">
           {prompt.action === "elevate" ? (
             <>
-              Enter your administrator (sudo) password to launch{" "}
-              <span className="font-mono">vFinder</span> with root privileges.
+              Enter your administrator (sudo) password to enable administrative
+              operations.
             </>
           ) : (
             <>
@@ -1671,7 +1671,7 @@ export const SudoPromptModal: React.FC<SudoPromptModalProps> = ({
             {prompt.busy
               ? "Authenticating..."
               : prompt.action === "elevate"
-              ? "Start Root Session"
+              ? "Enable Admin Access"
               : prompt.action === "mount"
               ? "Mount"
               : prompt.action === "unmount"

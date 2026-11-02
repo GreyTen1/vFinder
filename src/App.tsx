@@ -3096,6 +3096,9 @@ export const App: React.FC = () => {
         if (sudoPrompt.action === "elevate") {
           await apiElevateToRootSession(password);
           setSudoPrompt(null);
+          await refreshSidebar();
+          await loadCurrentEntries(true);
+          showToast("Administrative mode enabled");
         } else if (sudoPrompt.action === "mount") {
           const mountedPath = await apiMountPartition(
             sudoPrompt.device,

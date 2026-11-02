@@ -434,7 +434,7 @@ pub fn list_system_partitions() -> Vec<VolumeInfo> {
 }
 
 pub fn is_root_session() -> bool {
-    crate::is_effective_root()
+    crate::is_effective_root() || crate::is_admin_mode()
 }
 
 pub fn effective_user_home_dir() -> PathBuf {
@@ -558,7 +558,7 @@ fn run_sudo_command(password: &str, args: &[&str]) -> Result<(), String> {
 }
 
 fn validate_sudo_password(password: &str) -> Result<(), String> {
-    if is_root_session() {
+    if crate::is_effective_root() {
         return Ok(());
     }
     run_sudo_command(password, &["-k", "-v"])?;
@@ -566,51 +566,45 @@ fn validate_sudo_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn execute_privileged_task<F, R>(mut task: F, sudo_args: &[&str]) -> Result<R, String>
+where
+    F: FnMut() -> std::io::Result<R>,
+{
+    match task() {
+        Ok(res) => Ok(res),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(13) => {
+            // Permission denied: try executing targeted sudo command if privileged credentials exist
+            #[cfg(unix)]
+            {
+                let pass = if crate::is_effective_root() {
+                    String::new()
+                } else if let Some(cached) = get_cached_sudo_password() {
+                    cached
+                } else {
+                    return Err("AUTH_REQUIRED".to_string());
+                };
+
+                run_sudo_command(&pass, sudo_args)?;
+
+                // Re-attempt original task or return Ok
+                task().map_err(|retry_err| format!("{retry_err}"))
+            }
+            #[cfg(not(unix))]
+            Err(format!("{e}"))
+        }
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
 #[tauri::command]
 pub async fn elevate_to_root_session(
-    window: tauri::WebviewWindow,
+    _window: tauri::WebviewWindow,
     password: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         validate_sudo_password(&password)?;
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::process::Stdio;
-
-            let exe = std::env::current_exe()
-                .map_err(|e| format!("Could not resolve binary path: {e}"))?;
-            let env_pairs = crate::build_sudo_env_pairs();
-            let mut orig_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-            if !orig_args.iter().any(|a| a == "--sudo") {
-                orig_args.push(std::ffi::OsString::from("--sudo"));
-            }
-
-            let mut child = Command::new("sudo")
-                .env("LC_ALL", "C")
-                .arg("-S")
-                .arg("-p")
-                .arg("")
-                .arg("env")
-                .args(&env_pairs)
-                .arg(&exe)
-                .args(&orig_args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| format!("Failed to spawn elevated vFinder: {e}"))?;
-
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(format!("{password}\n").as_bytes());
-            }
-
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = window.close();
-            std::process::exit(0);
-        }
-        #[cfg(not(unix))]
-        Err("Root elevation is only supported on Unix systems".to_string())
+        crate::set_admin_mode(true);
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1663,20 +1657,85 @@ fn read_directory_sync(path: String, show_hidden: bool) -> Result<Vec<FileEntry>
         }
     }
 
-    let read_dir = fs::read_dir(&resolved_path).map_err(|e| format!("Cannot read {}: {}", resolved_str, e))?;
+    let read_dir_res = fs::read_dir(&resolved_path);
     let tags_map = load_tags_map();
     let open_cfg = load_open_with_config();
 
     let mut entries = Vec::with_capacity(64);
-    for item in read_dir.flatten() {
-        let file_name = item.file_name();
-        let name_str = file_name.to_string_lossy();
-        if !show_hidden && name_str.starts_with('.') {
-            continue;
+    match read_dir_res {
+        Ok(read_dir) => {
+            for item in read_dir.flatten() {
+                let file_name = item.file_name();
+                let name_str = file_name.to_string_lossy();
+                if !show_hidden && name_str.starts_with('.') {
+                    continue;
+                }
+                if let Some(entry) = build_file_entry_from_dir_entry(&item, &tags_map, &open_cfg) {
+                    entries.push(entry);
+                }
+            }
         }
-        if let Some(entry) = build_file_entry_from_dir_entry(&item, &tags_map, &open_cfg) {
-            entries.push(entry);
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(13) => {
+            // Unprivileged read denied: check if we have sudo credentials to list entries
+            #[cfg(unix)]
+            {
+                let pass = if crate::is_effective_root() {
+                    Some(String::new())
+                } else {
+                    get_cached_sudo_password()
+                };
+
+                if let Some(password) = pass {
+                    use std::io::Write;
+                    use std::process::Stdio;
+
+                    let mut child = Command::new("sudo")
+                        .env("LC_ALL", "C")
+                        .arg("-S")
+                        .arg("-p")
+                        .arg("")
+                        .args(["find", &resolved_str, "-maxdepth", "1", "-mindepth", "1", "-printf", "%f\t%y\t%s\t%T@\t%m\n"])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .map_err(|spawn_err| format!("Cannot read {}: {}", resolved_str, spawn_err))?;
+
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(format!("{}\n", password).as_bytes());
+                    }
+
+                    let out = child
+                        .wait_with_output()
+                        .map_err(|wait_err| format!("Cannot read {}: {}", resolved_str, wait_err))?;
+
+                    if out.status.success() {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        for line in stdout.lines() {
+                            let parts: Vec<&str> = line.split('\t').collect();
+                            if parts.is_empty() {
+                                continue;
+                            }
+                            let name = parts[0].to_string();
+                            if !show_hidden && name.starts_with('.') {
+                                continue;
+                            }
+                            let item_path = resolved_path.join(&name);
+                            if let Some(entry) = build_file_entry_with_cfg(&item_path, &tags_map, &open_cfg, false) {
+                                entries.push(entry);
+                            }
+                        }
+                    } else {
+                        return Err("AUTH_REQUIRED".to_string());
+                    }
+                } else {
+                    return Err("AUTH_REQUIRED".to_string());
+                }
+            }
+            #[cfg(not(unix))]
+            return Err(format!("Cannot read {}: {}", resolved_str, e));
         }
+        Err(e) => return Err(format!("Cannot read {}: {}", resolved_str, e)),
     }
 
     entries.sort_by_cached_key(|a| (!a.is_dir, a.name.to_lowercase()));
@@ -1798,7 +1857,11 @@ pub async fn create_directory(parent_path: String, name: String) -> Result<FileE
         if target.exists() {
             return Err(format!("'{}' already exists", name));
         }
-        fs::create_dir_all(&target).map_err(|e| format!("Failed to create folder: {}", e))?;
+        let target_str = target.to_string_lossy().to_string();
+        execute_privileged_task(
+            || fs::create_dir_all(&target),
+            &["mkdir", "-p", &target_str],
+        )?;
         bump_cache_version();
         let tags_map = load_tags_map();
         build_file_entry(&target, &tags_map, false)
@@ -1815,7 +1878,11 @@ pub async fn create_file(parent_path: String, name: String) -> Result<FileEntry,
         if target.exists() {
             return Err(format!("'{}' already exists", name));
         }
-        fs::write(&target, "").map_err(|e| format!("Failed to create file: {}", e))?;
+        let target_str = target.to_string_lossy().to_string();
+        execute_privileged_task(
+            || fs::write(&target, ""),
+            &["touch", &target_str],
+        )?;
         bump_cache_version();
         let tags_map = load_tags_map();
         build_file_entry(&target, &tags_map, false)
@@ -1836,10 +1903,14 @@ pub async fn rename_item(old_path: String, new_name: String) -> Result<FileEntry
         if dst.exists() && dst != src {
             return Err(format!("An item named '{}' already exists", new_name));
         }
-        fs::rename(src, &dst).map_err(|e| format!("Failed to rename item: {}", e))?;
+        let src_str = src.to_string_lossy().to_string();
+        let dst_str = dst.to_string_lossy().to_string();
+        execute_privileged_task(
+            || fs::rename(src, &dst),
+            &["mv", &src_str, &dst_str],
+        )?;
         bump_cache_version();
 
-        let dst_str = dst.to_string_lossy().to_string();
         let mut tags_map = load_tags_map();
         if let Some(existing_tags) = tags_map.remove(&old_path) {
             tags_map.insert(dst_str.clone(), existing_tags);
@@ -1927,10 +1998,22 @@ pub async fn copy_items(
                 .to_string_lossy()
                 .to_string();
             let target = unique_destination_path(dest_root, &file_name);
+            let src_str_clone = src_str.clone();
+            let target_str = target.to_string_lossy().to_string();
             if src.is_dir() {
-                copy_dir_recursive(src, &target)?;
+                if let Err(_e) = copy_dir_recursive(src, &target) {
+                    execute_privileged_task(
+                        || Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")),
+                        &["cp", "-a", &src_str_clone, &target_str],
+                    )?;
+                }
             } else {
-                fs::copy(src, &target).map_err(|e| format!("Copy failed: {}", e))?;
+                if let Err(_e) = fs::copy(src, &target) {
+                    execute_privileged_task(
+                        || Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")),
+                        &["cp", "-a", &src_str_clone, &target_str],
+                    )?;
+                }
             }
             created.push(target.to_string_lossy().to_string());
         }
@@ -1974,13 +2057,23 @@ pub async fn move_items(
                 .to_string_lossy()
                 .to_string();
             let target = unique_destination_path(dest_root, &file_name);
+            let src_str_clone = src_str.clone();
+            let target_str = target.to_string_lossy().to_string();
             if fs::rename(src, &target).is_err() {
                 if src.is_dir() {
-                    copy_dir_recursive(src, &target)?;
-                    fs::remove_dir_all(src).map_err(|e| e.to_string())?;
+                    if copy_dir_recursive(src, &target).is_err() || fs::remove_dir_all(src).is_err() {
+                        execute_privileged_task(
+                            || Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")),
+                            &["mv", &src_str_clone, &target_str],
+                        )?;
+                    }
                 } else {
-                    fs::copy(src, &target).map_err(|e| e.to_string())?;
-                    fs::remove_file(src).map_err(|e| e.to_string())?;
+                    if fs::copy(src, &target).is_err() || fs::remove_file(src).is_err() {
+                        execute_privileged_task(
+                            || Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")),
+                            &["mv", &src_str_clone, &target_str],
+                        )?;
+                    }
                 }
             }
             let target_str = target.to_string_lossy().to_string();
@@ -2464,14 +2557,29 @@ fn move_item_to_freedesktop_trash(src: &Path) -> Result<(), String> {
 }
 
 fn remove_permanently_with_trashinfo(target: &Path) -> Result<(), String> {
-    let meta = fs::symlink_metadata(target)
-        .map_err(|e| format!("Could not access {}: {e}", target.display()))?;
-    if meta.is_dir() && !meta.file_type().is_symlink() {
-        fs::remove_dir_all(target)
-            .map_err(|e| format!("Failed to delete folder {}: {e}", target.display()))?;
-    } else {
-        fs::remove_file(target)
-            .map_err(|e| format!("Failed to delete file {}: {e}", target.display()))?;
+    let target_str = target.to_string_lossy().to_string();
+    let meta = fs::symlink_metadata(target);
+    match meta {
+        Ok(m) => {
+            let is_dir = m.is_dir() && !m.file_type().is_symlink();
+            execute_privileged_task(
+                || {
+                    if is_dir {
+                        fs::remove_dir_all(target)
+                    } else {
+                        fs::remove_file(target)
+                    }
+                },
+                &["rm", "-rf", &target_str],
+            )?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(13) => {
+            execute_privileged_task(
+                || Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")),
+                &["rm", "-rf", &target_str],
+            )?;
+        }
+        Err(e) => return Err(format!("Could not access {target_str}: {e}")),
     }
 
     if let Some(parent) = target.parent() {
@@ -3275,8 +3383,12 @@ pub async fn set_file_executable(path: String, executable: bool) -> Result<(), S
         };
         let mut permissions = metadata.permissions();
         permissions.set_mode(updated_mode);
-        fs::set_permissions(item_path, permissions)
-            .map_err(|error| format!("Could not change executable permission: {error}"))?;
+        let chmod_arg = if executable { "+x" } else { "-x" };
+        let item_str = item_path.to_string_lossy().to_string();
+        execute_privileged_task(
+            || fs::set_permissions(item_path, permissions.clone()),
+            &["chmod", chmod_arg, &item_str],
+        )?;
         bump_cache_version();
         Ok(())
     })
