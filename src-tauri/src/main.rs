@@ -970,6 +970,21 @@ fn main() {
         if std::env::var_os("FREETYPE_PROPERTIES").is_none() {
             std::env::set_var("FREETYPE_PROPERTIES", "cff:no-stem-darkening=1 autofitter:no-stem-darkening=1");
         }
+
+        // When running inside an AppImage (mounted under /tmp/.mount_*), WebKitGTK's
+        // Bubblewrap sandbox mounts a private tmpfs over /tmp in WebKitWebProcess, which hides
+        // ${APPDIR}/usr/lib/gstreamer-1.0 and breaks video playback. Also isolate the GStreamer
+        // registry per mount so it never collides with the host distro's GStreamer cache.
+        if std::env::var_os("APPDIR").is_some() || std::env::var_os("APPIMAGE").is_some() {
+            std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            let gst_reg = std::env::temp_dir().join(format!(
+                "vfinder-appimage-gst-registry-{}.bin",
+                std::process::id()
+            ));
+            std::env::set_var("GST_REGISTRY_1_0", &gst_reg);
+            std::env::set_var("GST_REGISTRY", &gst_reg);
+        }
     }
 
     #[cfg(unix)]

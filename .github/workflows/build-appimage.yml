@@ -18,10 +18,18 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libsoup-3.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            gstreamer1.0-alsa \
+            gstreamer1.0-pulseaudio \
             build-essential \
             curl \
             wget \
             file \
+            patchelf \
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
@@ -40,7 +48,70 @@ jobs:
         run: npm ci
 
       - name: Build AppImage
-        run: npx tauri build --bundles appimage
+        run: |
+          STAGE_GST="/tmp/vfinder-gst-plugins"
+          rm -rf "$STAGE_GST"
+          mkdir -p "$STAGE_GST"
+          SYS_GST="/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
+
+          # Copy all base, good, ugly, and libav (H.264/HEVC/AAC) plugins
+          for pkg in libgstreamer1.0-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-alsa gstreamer1.0-pulseaudio; do
+            dpkg -L "$pkg" 2>/dev/null | grep -E '^/usr/lib/x86_64-linux-gnu/gstreamer-1\.0/.*\.so$' | while read -r so; do
+              [ -f "$so" ] && cp -f "$so" "$STAGE_GST/"
+            done
+          done
+
+          # Copy essential media/parser/subtitle plugins from gstreamer1.0-plugins-bad (including webvttenc and h264parse/h265parse)
+          for bad_so in \
+            libgstsubenc.so \
+            libgstvideoparsersbad.so \
+            libgstaudiobuffersplit.so \
+            libgstaudiofxbad.so \
+            libgstaudiolatency.so \
+            libgstaudiomixmatrix.so \
+            libgstautoconvert.so \
+            libgstid3tag.so \
+            libgstaiff.so \
+            libgstasfmux.so \
+            libgstadpcmdec.so \
+            libgstadpcmenc.so \
+            libgstclosedcaption.so \
+            libgstdash.so \
+            libgsthls.so \
+            libgstmpegtsdemux.so \
+            libgstmpegtsmux.so \
+            libgstmpegpsdemux.so \
+            libgstmpegpsmux.so \
+            libgstmxf.so \
+            libgstfaad.so \
+            libgstfdkaac.so \
+            libgstopusparse.so \
+            libgstdvdspu.so \
+            libgstsiren.so \
+            libgstspeed.so \
+            libgstswitchbin.so \
+            libgstlegacyrawparse.so \
+            libgstproxy.so \
+            libgstpcapparse.so \
+            libgstpnm.so \
+            libgsty4mdec.so \
+            libgstwebp.so \
+            libgstde265.so \
+            libgstvoaacenc.so; do
+            if [ -f "$SYS_GST/$bad_so" ]; then
+              cp -f "$SYS_GST/$bad_so" "$STAGE_GST/"
+            fi
+          done
+
+          # Drop any plugin with missing optional shared libraries so linuxdeploy never aborts
+          for f in "$STAGE_GST"/*.so; do
+            [ -f "$f" ] || continue
+            if ldd "$f" 2>&1 | grep -q "not found"; then
+              rm -f "$f"
+            fi
+          done
+
+          GSTREAMER_PLUGINS_DIR="$STAGE_GST" npx tauri build --bundles appimage
 
       - name: Upload AppImage Artifact
         uses: actions/upload-artifact@v4
