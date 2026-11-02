@@ -9,6 +9,7 @@ import {
   SidebarData,
   SortDirection,
   SortField,
+  ThemeMode,
   ViewMode,
   VolumeInfo,
   DownloadItem,
@@ -230,7 +231,55 @@ export const App: React.FC = () => {
     },
     []
   );
-  const [darkMode, setDarkMode] = useState(true);
+  const [themeMode, setThemeModeState] = useState<ThemeMode>(() => {
+    try {
+      const saved = localStorage.getItem("finder-theme-mode");
+      if (saved === "system" || saved === "light" || saved === "dark") {
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
+    return "system";
+  });
+  const [systemDark, setSystemDark] = useState<boolean>(() => {
+    try {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    let mql: MediaQueryList | null = null;
+    try {
+      mql = window.matchMedia("(prefers-color-scheme: dark)");
+    } catch {
+      return;
+    }
+    const handleChange = (event: MediaQueryListEvent) => {
+      setSystemDark(event.matches);
+    };
+    setSystemDark(mql.matches);
+    mql.addEventListener("change", handleChange);
+    return () => mql?.removeEventListener("change", handleChange);
+  }, []);
+  const setThemeMode = useCallback((mode: ThemeMode) => {
+    setThemeModeState(mode);
+    try {
+      localStorage.setItem("finder-theme-mode", mode);
+    } catch {
+      // ignore
+    }
+  }, []);
+  const darkMode = themeMode === "system" ? systemDark : themeMode === "dark";
+  useLayoutEffect(() => {
+    const bg = darkMode ? "#202024" : "#f2f2f5";
+    const fg = darkMode ? "#f4f4f5" : "#18181b";
+    document.documentElement.style.colorScheme = darkMode ? "dark" : "light";
+    document.documentElement.style.backgroundColor = bg;
+    document.body.style.backgroundColor = bg;
+    document.body.style.color = fg;
+  }, [darkMode]);
 
   const [tabs, setTabs] = useState<FinderTab[]>(() => [getInitialFinderTab()]);
   const [activeTabId, setActiveTabId] = useState("tab-1");
@@ -249,12 +298,21 @@ export const App: React.FC = () => {
     key: number;
   } | null>(null);
   const splitPaneHoveredRef = useRef(false);
+  const activePaneRef = useRef<"primary" | "split">("primary");
   const splitPaneSelectedPathsRef = useRef<string[]>([]);
+  const [splitPanePrimaryEntry, setSplitPanePrimaryEntry] =
+    useState<FileEntry | null>(null);
   const splitPaneSelectAllRef = useRef<(() => void) | null>(null);
+  const splitPaneNavigateKeyRef = useRef<
+    ((key: string, shiftKey: boolean) => FileEntry | null) | null
+  >(null);
   const closeSplitPane = useCallback(() => {
     splitPaneHoveredRef.current = false;
+    activePaneRef.current = "primary";
     splitPaneSelectedPathsRef.current = [];
+    setSplitPanePrimaryEntry(null);
     splitPaneSelectAllRef.current = null;
+    splitPaneNavigateKeyRef.current = null;
     setSplitPane(null);
   }, []);
   const appShellRef = useRef<HTMLDivElement>(null);
@@ -1340,12 +1398,29 @@ export const App: React.FC = () => {
   const handleSplitPaneHoverChange = useCallback((hovered: boolean) => {
     splitPaneHoveredRef.current = hovered;
   }, []);
-  const handleSplitPaneSelectionChange = useCallback((paths: string[]) => {
-    splitPaneSelectedPathsRef.current = paths;
-  }, []);
+  const handleSplitPaneSelectionChange = useCallback(
+    (paths: string[], selectedEntries: FileEntry[] = []) => {
+      splitPaneSelectedPathsRef.current = paths;
+      if (paths.length > 0) {
+        activePaneRef.current = "split";
+      }
+      setSplitPanePrimaryEntry(selectedEntries[0] || null);
+    },
+    []
+  );
   const handleSplitPaneSelectAllChange = useCallback(
     (selectAll: (() => void) | null) => {
       splitPaneSelectAllRef.current = selectAll;
+    },
+    []
+  );
+  const handleSplitPaneNavigateSelectionChange = useCallback(
+    (
+      navigateByKey:
+        | ((key: string, shiftKey: boolean) => FileEntry | null)
+        | null
+    ) => {
+      splitPaneNavigateKeyRef.current = navigateByKey;
     },
     []
   );
@@ -3433,10 +3508,16 @@ export const App: React.FC = () => {
         targetEl?.hasAttribute("data-file-search")
       ) {
         e.preventDefault();
+        const activeEntry =
+          splitPane &&
+          (splitPaneHoveredRef.current || activePaneRef.current === "split") &&
+          splitPanePrimaryEntry
+            ? splitPanePrimaryEntry
+            : primarySelectedEntry || splitPanePrimaryEntry;
         if (quickLookEntry) {
           setQuickLookEntry(null);
-        } else if (primarySelectedEntry) {
-          setQuickLookEntry(primarySelectedEntry);
+        } else if (activeEntry) {
+          setQuickLookEntry(activeEntry);
         }
         return;
       }
@@ -3458,8 +3539,10 @@ export const App: React.FC = () => {
       if (cmdOrCtrl && e.key.toLowerCase() === "a") {
         e.preventDefault();
         if (splitPaneHoveredRef.current && splitPaneSelectAllRef.current) {
+          activePaneRef.current = "split";
           splitPaneSelectAllRef.current();
         } else {
+          activePaneRef.current = "primary";
           setSelectedPaths(sortedEntries.map((item) => item.path));
         }
         return;
@@ -3468,10 +3551,16 @@ export const App: React.FC = () => {
       // Spacebar -> Toggle Quick Look
       if (e.code === "Space" && !cmdOrCtrl) {
         e.preventDefault();
+        const activeEntry =
+          splitPane &&
+          (splitPaneHoveredRef.current || activePaneRef.current === "split") &&
+          splitPanePrimaryEntry
+            ? splitPanePrimaryEntry
+            : primarySelectedEntry || splitPanePrimaryEntry;
         if (quickLookEntry) {
           setQuickLookEntry(null);
-        } else if (primarySelectedEntry) {
-          setQuickLookEntry(primarySelectedEntry);
+        } else if (activeEntry) {
+          setQuickLookEntry(activeEntry);
         }
         return;
       }
@@ -3535,6 +3624,28 @@ export const App: React.FC = () => {
       }
 
       // Arrow navigation, Home/End, and Type-Ahead search (desktop file explorer standard)
+      if (
+        !cmdOrCtrl &&
+        !e.altKey &&
+        !renamingPath &&
+        splitPane &&
+        (splitPaneHoveredRef.current || activePaneRef.current === "split") &&
+        splitPaneNavigateKeyRef.current &&
+        (e.key === "Home" ||
+          e.key === "End" ||
+          e.key === "ArrowDown" ||
+          e.key === "ArrowUp" ||
+          e.key === "ArrowLeft" ||
+          e.key === "ArrowRight")
+      ) {
+        e.preventDefault();
+        const nextEntry = splitPaneNavigateKeyRef.current(e.key, e.shiftKey);
+        if (nextEntry && quickLookEntry) {
+          setQuickLookEntry(nextEntry);
+        }
+        return;
+      }
+
       if (!cmdOrCtrl && !e.altKey && !renamingPath && sortedEntries.length > 0) {
         // Home -> First item
         if (e.key === "Home") {
@@ -3577,17 +3688,17 @@ export const App: React.FC = () => {
 
           let targetIdx = curIdx;
           if (viewMode === "icons") {
-            let cols = 1;
+            const cellWidth = Math.max(96, iconSize + 44);
             const el = primarySelectedEntry
               ? document.querySelector(`[data-entry-path="${CSS.escape(primarySelectedEntry.path)}"]`)
               : null;
-            if (el?.parentElement) {
-              const parentW = el.parentElement.clientWidth;
-              const itemW = (el as HTMLElement).offsetWidth || 110;
-              cols = Math.max(1, Math.round(parentW / (itemW + 12)));
-            } else {
-              cols = Math.max(1, Math.round(window.innerWidth / (iconSize + 56)));
-            }
+            const iconContainer = document.querySelector<HTMLElement>('[data-tab-scroll-view="icons"]');
+            const contentWidth = el?.parentElement
+              ? el.parentElement.clientWidth
+              : iconContainer
+              ? Math.max(0, iconContainer.clientWidth - 40)
+              : Math.max(0, window.innerWidth - 40);
+            const cols = Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)));
 
             if (e.key === "ArrowRight") targetIdx = curIdx === -1 ? 0 : Math.min(sortedEntries.length - 1, curIdx + 1);
             else if (e.key === "ArrowLeft") targetIdx = curIdx === -1 ? 0 : Math.max(0, curIdx - 1);
@@ -3691,8 +3802,25 @@ export const App: React.FC = () => {
       // Ctrl + I -> Get Info
       if (cmdOrCtrl && e.key.toLowerCase() === "i") {
         e.preventDefault();
-        if (primarySelectedEntry) {
-          setGetInfoEntry(primarySelectedEntry);
+        const activeEntry =
+          splitPane &&
+          (splitPaneHoveredRef.current || activePaneRef.current === "split") &&
+          splitPanePrimaryEntry
+            ? splitPanePrimaryEntry
+            : primarySelectedEntry || splitPanePrimaryEntry;
+        if (activeEntry) {
+          setGetInfoVolume(null);
+          setGetInfoEntry(activeEntry);
+        } else if (
+          activeTab?.path &&
+          !activeTab.activeTag &&
+          activeTab.path !== "__RECENTS__" &&
+          activeTab.path !== "__TRASH__"
+        ) {
+          void handleGetFavoriteInfo(
+            activeTab.path,
+            folderDisplayName(activeTab.path, mainPartitionName)
+          );
         }
         return;
       }
@@ -3774,6 +3902,7 @@ export const App: React.FC = () => {
     confirmTrashAction,
     handleDeletePermanently,
     primarySelectedEntry,
+    splitPanePrimaryEntry,
     renamingPath,
     activeTab,
     startRename,
@@ -3822,9 +3951,17 @@ export const App: React.FC = () => {
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, entry?: FileEntry, targetDir?: string) => {
       e.preventDefault();
-      if (entry && !selectedPathsRef.current.includes(entry.path)) {
-        setSelectedPaths([entry.path]);
-        lastSelectedPathRef.current = entry.path;
+      const inSplitPane = Boolean(
+        (e.target as HTMLElement | null)?.closest("[data-split-pane]")
+      );
+      if (inSplitPane) {
+        activePaneRef.current = "split";
+      } else {
+        activePaneRef.current = "primary";
+        if (entry && !selectedPathsRef.current.includes(entry.path)) {
+          setSelectedPaths([entry.path]);
+          lastSelectedPathRef.current = entry.path;
+        }
       }
       setContextMenu({ x: e.clientX, y: e.clientY, entry, targetDir });
     },
@@ -3870,7 +4007,9 @@ export const App: React.FC = () => {
       try {
         const entry = await apiGetFileInfo(path);
         setGetInfoVolume(null);
-        setGetInfoEntry(entry);
+        setGetInfoEntry(
+          name && entry.path === "/" ? { ...entry, name } : entry
+        );
       } catch (err) {
         showToast(`Could not get info for ${name || path}: ${err}`);
       }
@@ -3896,8 +4035,14 @@ export const App: React.FC = () => {
   }, []);
 
   const handleQuickLook = useCallback(() => {
-    if (primarySelectedEntry) setQuickLookEntry(primarySelectedEntry);
-  }, [primarySelectedEntry]);
+    const activeEntry =
+      splitPane &&
+      (splitPaneHoveredRef.current || activePaneRef.current === "split") &&
+      splitPanePrimaryEntry
+        ? splitPanePrimaryEntry
+        : primarySelectedEntry || splitPanePrimaryEntry;
+    if (activeEntry) setQuickLookEntry(activeEntry);
+  }, [primarySelectedEntry, splitPane, splitPanePrimaryEntry]);
 
   const activeDropTargetPath =
     dragState?.dropTargetPath ||
@@ -3907,6 +4052,14 @@ export const App: React.FC = () => {
   const isArchiveWorkspace = Boolean(
     archiveRoot &&
       (activePath === archiveRoot || activePath.startsWith(`${archiveRoot}/`))
+  );
+
+  const draggedPaths = useMemo(
+    () => [
+      ...(dragState?.paths || []),
+      ...(clipboard?.mode === "cut" ? clipboard.paths : []),
+    ],
+    [dragState?.paths, clipboard]
   );
 
   const commonViewProps = {
@@ -3922,10 +4075,7 @@ export const App: React.FC = () => {
     onStartItemDrag: handleStartItemDrag,
     dropTargetPath: activeDropTargetPath,
     // Cut items share the subdued treatment used for actively dragged items.
-    draggedPaths: [
-      ...(dragState?.paths || []),
-      ...(clipboard?.mode === "cut" ? clipboard.paths : []),
-    ],
+    draggedPaths,
     refreshVersion,
     renamingPath,
     renameValue,
@@ -4045,6 +4195,16 @@ export const App: React.FC = () => {
           if (primarySelectedEntry) {
             setGetInfoVolume(null);
             setGetInfoEntry(primarySelectedEntry);
+          } else if (
+            activeTab?.path &&
+            !activeTab.activeTag &&
+            activeTab.path !== "__RECENTS__" &&
+            activeTab.path !== "__TRASH__"
+          ) {
+            void handleGetFavoriteInfo(
+              activeTab.path,
+              folderDisplayName(activeTab.path, mainPartitionName)
+            );
           } else {
             showToast("Select a file or folder first to inspect");
           }
@@ -4053,7 +4213,8 @@ export const App: React.FC = () => {
         sidebarOpen={sidebarOpen}
         onToggleSidebar={toggleSidebar}
         darkMode={darkMode}
-        onToggleDarkMode={() => setDarkMode((v) => !v)}
+        themeMode={themeMode}
+        onChangeThemeMode={setThemeMode}
         tabs={splitPane ? tabs.filter((tab) => tab.id !== splitPane.tabId) : tabs}
         activeTabId={activeTabId}
         splitTab={splitPane ? {
@@ -4155,6 +4316,9 @@ export const App: React.FC = () => {
           >
             <div
               ref={primaryPaneRef}
+              onMouseDownCapture={() => {
+                activePaneRef.current = "primary";
+              }}
               data-drop-path={
                 activeTab && !activeTab.activeTag && activeTab.path !== "__RECENTS__"
                   ? activeTab.path
@@ -4274,6 +4438,8 @@ export const App: React.FC = () => {
                 onHoverChange={handleSplitPaneHoverChange}
                 onSelectionChange={handleSplitPaneSelectionChange}
                 onSelectAllChange={handleSplitPaneSelectAllChange}
+                onNavigateSelectionChange={handleSplitPaneNavigateSelectionChange}
+                onContextMenu={handleContextMenu}
               />
             )}
             {splitPane && (
@@ -4385,9 +4551,24 @@ export const App: React.FC = () => {
           if (entry) {
             setGetInfoVolume(null);
             setGetInfoEntry(entry);
+            return;
+          }
+          const folderPath = contextMenu?.targetDir || activeTab?.path;
+          if (
+            folderPath &&
+            !activeTab?.activeTag &&
+            folderPath !== "__RECENTS__" &&
+            folderPath !== "__TRASH__"
+          ) {
+            void handleGetFavoriteInfo(
+              folderPath,
+              folderDisplayName(folderPath, mainPartitionName)
+            );
           } else if (primarySelectedEntry) {
             setGetInfoVolume(null);
             setGetInfoEntry(primarySelectedEntry);
+          } else {
+            showToast("Folder info is not available for this location");
           }
         }}
         onRename={startRename}

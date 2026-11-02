@@ -41,6 +41,7 @@ import { FileIcon } from "./FileIcon";
 import {
   apiReadFilePreview,
   apiGetFilePreviewUrl,
+  apiGetFileInfo,
   apiGetAvailableFormatTypes,
 } from "../api";
 import { useToolbarOutsideDismiss } from "./useToolbarOutsideDismiss";
@@ -135,11 +136,11 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
             <button
               onClick={onClose}
               title="Close (Esc)"
-              className="w-3.5 h-3.5 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-85 transition-opacity cursor-pointer p-0"
+              className="w-3.5 h-3.5 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/close"
             >
               <svg
                 viewBox="0 0 12 12"
-                className="w-2 h-2 text-black/80 pointer-events-none"
+                className="w-2 h-2 text-black/80 opacity-0 group-hover/close:opacity-100 pointer-events-none"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.3"
@@ -283,7 +284,10 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
               <p className="text-xs opacity-60">{entry.kind}</p>
               <p className="text-xs opacity-50">
                 {entry.isDir
-                  ? `${entry.childCount ?? 0} items`
+                  ? (() => {
+                      const count = preview?.childCount ?? entry.childCount ?? 0;
+                      return `${count} ${count === 1 ? "item" : "items"}`;
+                    })()
                   : formatBytes(entry.size)}
               </p>
               <p className="text-[11px] opacity-45">
@@ -325,12 +329,42 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
 }) => {
   const [appInput, setAppInput] = useState("");
   const [executableBusy, setExecutableBusy] = useState(false);
+  const [resolvedChildCount, setResolvedChildCount] = useState<number | null>(
+    entry?.childCount ?? null
+  );
   const dialogRef = useRef<HTMLDivElement>(null);
   useToolbarOutsideDismiss(dialogRef, Boolean(entry || volume), onClose);
 
   useEffect(() => {
     setAppInput(entry?.defaultApp || "");
   }, [entry?.path, entry?.defaultApp]);
+
+  useEffect(() => {
+    if (!entry || !entry.isDir) {
+      setResolvedChildCount(null);
+      return;
+    }
+    if (entry.childCount != null) {
+      setResolvedChildCount(entry.childCount);
+      return;
+    }
+    let cancelled = false;
+    setResolvedChildCount(null);
+    apiGetFileInfo(entry.path)
+      .then((info) => {
+        if (!cancelled) {
+          setResolvedChildCount(info.childCount ?? 0);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setResolvedChildCount(0);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [entry?.path, entry?.isDir, entry?.childCount]);
 
   if (!entry && !volume) return null;
 
@@ -366,11 +400,11 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
             <button
               onClick={onClose}
               title="Close (Esc)"
-              className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-85 transition-opacity cursor-pointer p-0"
+              className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/close"
             >
               <svg
                 viewBox="0 0 12 12"
-                className="w-2 h-2 text-black/80 pointer-events-none"
+                className="w-2 h-2 text-black/80 opacity-0 group-hover/close:opacity-100 pointer-events-none"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.3"
@@ -499,11 +533,11 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
           <button
             onClick={onClose}
             title="Close (Esc)"
-            className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-85 transition-opacity cursor-pointer p-0"
+            className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/close"
           >
             <svg
               viewBox="0 0 12 12"
-              className="w-2 h-2 text-black/80 pointer-events-none"
+              className="w-2 h-2 text-black/80 opacity-0 group-hover/close:opacity-100 pointer-events-none"
               fill="none"
               stroke="currentColor"
               strokeWidth="1.3"
@@ -526,7 +560,11 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
             <div className="opacity-55 text-[11px]">{entry.kind}</div>
           </div>
           <div className="font-semibold text-xs">
-            {entry.isDir ? "--" : formatBytes(entry.size)}
+            {entry.isDir
+              ? resolvedChildCount == null
+                ? "…"
+                : `${resolvedChildCount} ${resolvedChildCount === 1 ? "item" : "items"}`
+              : formatBytes(entry.size)}
           </div>
         </div>
 
@@ -612,7 +650,9 @@ export const GetInfoModal: React.FC<GetInfoModalProps> = ({
             <span className="opacity-55 text-right pr-2">Size:</span>
             <span className="col-span-2">
               {entry.isDir
-                ? `${entry.childCount ?? 0} items`
+                ? resolvedChildCount == null
+                  ? "Calculating…"
+                  : `${resolvedChildCount} ${resolvedChildCount === 1 ? "item" : "items"}`
                 : `${formatBytes(entry.size)} (${entry.size.toLocaleString()} bytes)`}
             </span>
           </div>
@@ -2241,11 +2281,11 @@ export const OpenWithModal: React.FC<OpenWithModalProps> = ({
             type="button"
             onClick={onClose}
             title="Close (Esc)"
-            className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-85 transition-opacity cursor-pointer p-0"
+            className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/close"
           >
             <svg
               viewBox="0 0 12 12"
-              className="w-2 h-2 text-black/80 pointer-events-none"
+              className="w-2 h-2 text-black/80 opacity-0 group-hover/close:opacity-100 pointer-events-none"
               fill="none"
               stroke="currentColor"
               strokeWidth="1.3"

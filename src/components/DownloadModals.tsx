@@ -190,11 +190,11 @@ export const DownloadPromptModal: React.FC<DownloadPromptModalProps> = ({
             type="button"
             onClick={onClose}
             title="Close (Esc)"
-            className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-85 transition-opacity cursor-pointer p-0"
+            className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/close"
           >
             <svg
               viewBox="0 0 12 12"
-              className="w-2 h-2 text-black/80 pointer-events-none"
+              className="w-2 h-2 text-black/80 opacity-0 group-hover/close:opacity-100 pointer-events-none"
               fill="none"
               stroke="currentColor"
               strokeWidth="1.3"

@@ -71,6 +71,7 @@ export interface FilePreview {
 export type ViewMode = "icons" | "list" | "columns" | "gallery";
 export type SortField = "name" | "modified" | "size" | "kind";
 export type SortDirection = "asc" | "desc";
+export type ThemeMode = "system" | "light" | "dark";
 
 export interface FinderTab {
   id: string;

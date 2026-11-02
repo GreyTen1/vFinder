@@ -38,7 +38,7 @@ There is no test script configured in `package.json`. Linux builds need the Taur
 - For large media previews, use the local tokenized HTTP stream and byte-range support instead of reading the entire file into a data URL. The WebView's media/PDF support depends on the system WebKitGTK installation.
 - Keep the app's custom window usable on Linux desktops: the native window has decorations disabled, and blank toolbar areas need to remain draggable while controls continue to receive clicks.
 - Keyboard shortcuts are implemented centrally in `src/App.tsx`. The established shortcut convention is Ctrl-based; avoid introducing Super/Command bindings.
-- The app accepts an optional directory path as a startup argument. Relative paths are resolved against the process working directory; no valid directory argument means the app starts at Home.
+- The app accepts an optional directory/file path or `file://` URI as a startup argument (relative paths are resolved against the process working directory; if a file is given, its parent folder opens with the file selected; no valid path means the app starts at Home). Supported CLI flags in `src-tauri/src/main.rs` are `-h`/`--help`, `-v`/`--version`, and `--sudo` (administrative mode).
 - App preferences and some view settings are stored in `localStorage`; check existing keys and initialization behavior before changing defaults or persistence.
 - Avoid unrelated formatting or broad refactors in this long-lived codebase. Inspect `git status` before editing and preserve pre-existing user changes.
 

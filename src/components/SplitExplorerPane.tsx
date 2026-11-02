@@ -30,8 +30,16 @@ interface SplitExplorerPaneProps {
   onClose: () => void;
   onLocationChange: (location: PaneLocation) => void;
   onHoverChange: (hovered: boolean) => void;
-  onSelectionChange: (paths: string[]) => void;
+  onSelectionChange: (paths: string[], selectedEntries: FileEntry[]) => void;
   onSelectAllChange: (selectAll: (() => void) | null) => void;
+  onNavigateSelectionChange?: (
+    navigateByKey: ((key: string, shiftKey: boolean) => FileEntry | null) | null
+  ) => void;
+  onContextMenu?: (
+    e: React.MouseEvent,
+    entry?: FileEntry,
+    targetDir?: string
+  ) => void;
 }
 
 export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
@@ -48,12 +56,16 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   onHoverChange,
   onSelectionChange,
   onSelectAllChange,
+  onNavigateSelectionChange,
+  onContextMenu,
 }) => {
   const [history, setHistory] = useState<PaneLocation[]>([
     { path: initialPath, title: initialTitle, activeTag: initialTag },
   ]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [entries, setEntries] = useState<FileEntry[]>([]);
+  const entriesRef = useRef<FileEntry[]>([]);
+  entriesRef.current = entries;
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const selectedPathsRef = useRef<string[]>([]);
   selectedPathsRef.current = selectedPaths;
@@ -91,7 +103,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
       });
     selectedPathsRef.current = [];
     setSelectedPaths([]);
-    onSelectionChange([]);
+    onSelectionChange([], []);
     selectionAnchorRef.current = null;
     return () => {
       mounted = false;
@@ -182,17 +194,30 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
     return [entry.path];
   };
 
+  const notifySelection = useCallback(
+    (paths: string[], items: FileEntry[] = entriesRef.current) => {
+      if (paths.length === 0) {
+        onSelectionChange([], []);
+        return;
+      }
+      const pathSet = new Set(paths);
+      const selectedItems = items.filter((item) => pathSet.has(item.path));
+      onSelectionChange(paths, selectedItems);
+    },
+    [onSelectionChange]
+  );
+
   const setSelection = useCallback((paths: string[]) => {
     selectedPathsRef.current = paths;
     setSelectedPaths(paths);
-    onSelectionChange(paths);
-  }, [onSelectionChange]);
+    notifySelection(paths);
+  }, [notifySelection]);
   const clearSelection = useCallback(() => {
     selectedPathsRef.current = [];
     selectionAnchorRef.current = null;
     setSelectedPaths([]);
-    onSelectionChange([]);
-  }, [onSelectionChange]);
+    notifySelection([]);
+  }, [notifySelection]);
   const selectAll = useCallback(() => {
     setSelection(entries.map((entry) => entry.path));
   }, [entries, setSelection]);
@@ -200,6 +225,64 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
     onSelectAllChange(selectAll);
     return () => onSelectAllChange(null);
   }, [onSelectAllChange, selectAll]);
+
+  const navigateByKey = useCallback(
+    (key: string, shiftKey: boolean): FileEntry | null => {
+      const list = entriesRef.current;
+      if (list.length === 0) return null;
+      const currentSelected = selectedPathsRef.current;
+      const primaryPath =
+        currentSelected[currentSelected.length - 1] || currentSelected[0] || null;
+      const curIdx = primaryPath
+        ? list.findIndex((item) => item.path === primaryPath)
+        : -1;
+
+      const contentWidth = containerRef.current
+        ? Math.max(0, containerRef.current.clientWidth - 16)
+        : 300;
+      const cols = Math.max(1, Math.floor((contentWidth + 4) / (96 + 4)));
+
+      let targetIdx = curIdx;
+      if (key === "Home") targetIdx = 0;
+      else if (key === "End") targetIdx = list.length - 1;
+      else if (key === "ArrowRight")
+        targetIdx = curIdx === -1 ? 0 : Math.min(list.length - 1, curIdx + 1);
+      else if (key === "ArrowLeft")
+        targetIdx = curIdx === -1 ? 0 : Math.max(0, curIdx - 1);
+      else if (key === "ArrowDown")
+        targetIdx = curIdx === -1 ? 0 : Math.min(list.length - 1, curIdx + cols);
+      else if (key === "ArrowUp")
+        targetIdx =
+          curIdx === -1 ? list.length - 1 : Math.max(0, curIdx - cols);
+
+      if (targetIdx < 0 || targetIdx >= list.length) return null;
+      const targetEntry = list[targetIdx];
+      let nextPaths: string[];
+      if (shiftKey) {
+        const anchorPath =
+          selectionAnchorRef.current || primaryPath || targetEntry.path;
+        const anchorIdx = list.findIndex((item) => item.path === anchorPath);
+        const start = Math.min(anchorIdx >= 0 ? anchorIdx : 0, targetIdx);
+        const end = Math.max(anchorIdx >= 0 ? anchorIdx : 0, targetIdx);
+        nextPaths = list.slice(start, end + 1).map((item) => item.path);
+      } else {
+        selectionAnchorRef.current = targetEntry.path;
+        nextPaths = [targetEntry.path];
+      }
+      setSelection(nextPaths);
+      const el = containerRef.current?.querySelector<HTMLElement>(
+        `[data-entry-path="${CSS.escape(targetEntry.path)}"]`
+      );
+      el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      return targetEntry;
+    },
+    [setSelection]
+  );
+
+  useEffect(() => {
+    onNavigateSelectionChange?.(navigateByKey);
+    return () => onNavigateSelectionChange?.(null);
+  }, [onNavigateSelectionChange, navigateByKey]);
   const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
     containerRef,
     selectedPaths,
@@ -284,6 +367,9 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
       <div
         ref={containerRef}
         onMouseDown={handleContainerMouseDown}
+        onContextMenu={(e) =>
+          onContextMenu?.(e, undefined, location.activeTag ? undefined : location.path)
+        }
         className="relative min-h-0 flex-1 overflow-auto p-2"
       >
         {loading ? (
@@ -299,7 +385,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
             This folder is empty
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-1">
+          <div className="grid grid-cols-[repeat(auto-fill,96px)] justify-start gap-1">
             {entries.map((entry) => {
               const selected = selectedPaths.includes(entry.path);
               return (
@@ -325,7 +411,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
                     if (!modifiers.shift) selectionAnchorRef.current = entry.path;
                     selectedPathsRef.current = nextSelection;
                     setSelectedPaths(nextSelection);
-                    onSelectionChange(nextSelection);
+                    notifySelection(nextSelection);
                     onStartItemDrag(
                       event,
                       entry,
@@ -335,13 +421,28 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
                           const singleSelection = [entry.path];
                           selectedPathsRef.current = singleSelection;
                           setSelectedPaths(singleSelection);
-                          onSelectionChange(singleSelection);
+                          notifySelection(singleSelection);
                         }
                       },
                       nextSelection
                     );
                   }}
                   onDoubleClick={() => void openEntry(entry)}
+                  onContextMenu={(event) => {
+                    event.stopPropagation();
+                    if (!selectedPathsRef.current.includes(entry.path)) {
+                      const singleSelection = [entry.path];
+                      selectionAnchorRef.current = entry.path;
+                      selectedPathsRef.current = singleSelection;
+                      setSelectedPaths(singleSelection);
+                      notifySelection(singleSelection);
+                    }
+                    onContextMenu?.(
+                      event,
+                      entry,
+                      location.activeTag ? undefined : location.path
+                    );
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
                       event.preventDefault();

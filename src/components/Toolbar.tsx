@@ -14,8 +14,6 @@ import {
   Eye,
   EyeOff,
   Info,
-  Sun,
-  Moon,
   PanelLeft,
   Plus,
   X,
@@ -29,7 +27,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { FinderTab, SortDirection, SortField, ViewMode } from "../types";
+import { FinderTab, SortDirection, SortField, ThemeMode, ViewMode } from "../types";
 import { apiOpenDetachedTab } from "../api";
 
 interface ToolbarProps {
@@ -56,7 +54,8 @@ interface ToolbarProps {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   darkMode: boolean;
-  onToggleDarkMode: () => void;
+  themeMode: ThemeMode;
+  onChangeThemeMode: (mode: ThemeMode) => void;
   tabs: FinderTab[];
   activeTabId: string;
   splitTab?: Pick<FinderTab, "id" | "title" | "path" | "archiveWorkspaceRoot"> | null;
@@ -129,7 +128,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   sidebarOpen,
   onToggleSidebar,
   darkMode,
-  onToggleDarkMode,
+  themeMode,
+  onChangeThemeMode,
   tabs,
   activeTabId,
   splitTab = null,
@@ -161,10 +161,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       return "left";
     }
   });
-  const [windowControlsStyle, setWindowControlsStyle] = useState<"macos" | "vscode">(() => {
+  const [windowControlsStyle, setWindowControlsStyle] = useState<"macos" | "standard">(() => {
     try {
-      return localStorage.getItem("finder-window-controls-style") === "vscode"
-        ? "vscode"
+      const saved = localStorage.getItem("finder-window-controls-style");
+      return saved === "standard" || saved === "vscode"
+        ? "standard"
         : "macos";
     } catch {
       return "macos";
@@ -309,7 +310,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     }
   };
 
-  const updateWindowControlsStyle = (style: "macos" | "vscode") => {
+  const updateWindowControlsStyle = (style: "macos" | "standard") => {
     setWindowControlsStyle(style);
     try {
       localStorage.setItem("finder-window-controls-style", style);
@@ -482,17 +483,17 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   const windowControls = (
     <div
       onMouseDown={(e) => e.stopPropagation()}
-      className={`flex items-center shrink-0 ${windowControlsStyle === "vscode" ? "gap-0" : "gap-2 mr-2"}`}
+      className={`flex items-center shrink-0 ${windowControlsStyle === "standard" ? "gap-0" : "gap-2 mr-2"}`}
     >
       <button
         onClick={handleCloseWindow}
         title="Close Window"
         aria-label="Close window"
-        className={windowControlsStyle === "vscode"
+        className={windowControlsStyle === "standard"
           ? "order-3 w-8 h-[52px] flex items-center justify-center text-zinc-500 hover:bg-[#e81123] hover:text-white transition-colors"
           : "w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/close"}
       >
-        {windowControlsStyle === "vscode" ? <X className="w-3.5 h-3.5" /> : (
+        {windowControlsStyle === "standard" ? <X className="w-3.5 h-3.5" /> : (
           <svg viewBox="0 0 12 12" className="w-2 h-2 text-black/80 opacity-0 group-hover/close:opacity-100 pointer-events-none" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
             <path d="M3.5 3.5L8.5 8.5M8.5 3.5L3.5 8.5" />
           </svg>
@@ -502,11 +503,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         onClick={handleMinimizeWindow}
         title="Minimize Window"
         aria-label="Minimize window"
-        className={windowControlsStyle === "vscode"
+        className={windowControlsStyle === "standard"
           ? `order-1 w-8 h-[52px] flex items-center justify-center transition-colors ${darkMode ? "text-zinc-400 hover:bg-white/10" : "text-zinc-600 hover:bg-black/10"}`
           : "w-3 h-3 rounded-full bg-[#febc2e] border border-[#d89e24] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/minimize"}
       >
-        {windowControlsStyle === "vscode" ? <Minus className="w-3.5 h-3.5" /> : (
+        {windowControlsStyle === "standard" ? <Minus className="w-3.5 h-3.5" /> : (
           <svg viewBox="0 0 12 12" className="w-2 h-2 text-black/80 opacity-0 group-hover/minimize:opacity-100 pointer-events-none" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
             <path d="M2.5 6H9.5" />
           </svg>
@@ -516,11 +517,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         onClick={handleMaximizeWindow}
         title="Maximize Window"
         aria-label="Maximize window"
-        className={windowControlsStyle === "vscode"
+        className={windowControlsStyle === "standard"
           ? `order-2 w-8 h-[52px] flex items-center justify-center transition-colors ${darkMode ? "text-zinc-400 hover:bg-white/10" : "text-zinc-600 hover:bg-black/10"}`
           : "w-3 h-3 rounded-full bg-[#28c840] border border-[#1aab29] flex items-center justify-center hover:opacity-90 cursor-pointer p-0 group/maximize"}
       >
-        {windowControlsStyle === "vscode" ? <Square className="w-3 h-3" /> : (
+        {windowControlsStyle === "standard" ? <Square className="w-3 h-3" /> : (
           <svg viewBox="0 0 12 12" className="w-2 h-2 text-black/80 opacity-0 group-hover/maximize:opacity-100 pointer-events-none" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
             <path d="M6 2.5V9.5M2.5 6H9.5" />
           </svg>
@@ -529,7 +530,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     </div>
   );
   const vscodeControlsOnRight =
-    windowControlsSide === "right" && windowControlsStyle === "vscode";
+    windowControlsSide === "right" && windowControlsStyle === "standard";
 
   useEffect(() => {
     const updateViewSwitcherOffset = () => {
@@ -868,22 +869,27 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   <span>Reload Folder</span>
                   <span className="ml-auto opacity-60 text-[10px]">Ctrl+R</span>
                 </button>
-                <button
-                  onClick={() => {
-                    onToggleDarkMode();
-                    setActionMenuOpen(false);
-                  }}
-                  className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 hover:bg-[#0a84ff] hover:text-white"
-                >
-                  {darkMode ? (
-                    <Sun className="w-3.5 h-3.5" />
-                  ) : (
-                    <Moon className="w-3.5 h-3.5" />
-                  )}
-                  <span>
-                    {darkMode ? "Switch to Light Appearance" : "Switch to Dark Appearance"}
-                  </span>
-                </button>
+                <div className={`my-1 border-t ${darkMode ? "border-white/10" : "border-black/10"}`} />
+                <div className="px-3 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wide opacity-50">
+                  Appearance
+                </div>
+                <div className="px-3 pb-2">
+                  <div className={`flex rounded-md p-0.5 ${darkMode ? "bg-black/25" : "bg-black/5"}`}>
+                    {([
+                      ["system", "System"],
+                      ["light", "Light"],
+                      ["dark", "Dark"],
+                    ] as const).map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        onClick={() => onChangeThemeMode(mode)}
+                        className={`flex-1 rounded px-2 py-1 ${themeMode === mode ? darkMode ? "bg-white/15 text-white" : "bg-white text-zinc-900 shadow-sm" : "opacity-70 hover:opacity-100"}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className={`my-1 border-t ${darkMode ? "border-white/10" : "border-black/10"}`} />
                 <div className="px-3 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wide opacity-50">
                   Window Controls
@@ -905,7 +911,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 <div className="px-3 pb-1">
                   <div className="mb-1.5 opacity-70">Style</div>
                   <div className={`flex rounded-md p-0.5 ${darkMode ? "bg-black/25" : "bg-black/5"}`}>
-                    {([ ["macos", "macOS"], ["vscode", "VS Code"] ] as const).map(([style, label]) => (
+                    {([ ["macos", "macOS"], ["standard", "Standard"] ] as const).map(([style, label]) => (
                       <button
                         key={style}
                         onClick={() => updateWindowControlsStyle(style)}

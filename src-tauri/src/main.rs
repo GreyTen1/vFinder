@@ -915,7 +915,53 @@ pub fn setup_linux_webview(window: &tauri::WebviewWindow) {
     });
 }
 
+fn print_cli_help() {
+    println!(
+        "vFinder {version} - macOS-inspired desktop file manager for Linux\n\
+         \n\
+         USAGE:\n\
+         \x20   vfinder [OPTIONS] [PATH]\n\
+         \n\
+         ARGUMENTS:\n\
+         \x20   [PATH]          Optional directory path, file path, or file:// URI to open\n\
+         \x20                   on startup. Relative paths are resolved against the current\n\
+         \x20                   working directory. If a file is specified, its parent folder\n\
+         \x20                   is opened with the file selected. Defaults to Home.\n\
+         \n\
+         OPTIONS:\n\
+         \x20   -h, --help      Print this help message and exit\n\
+         \x20   -v, --version   Print version information and exit\n\
+         \x20   --sudo          Launch in administrative mode with elevated privileges\n\
+         \x20                   (authenticates via terminal sudo or prompts in the GUI)\n\
+         \n\
+         ENVIRONMENT:\n\
+         \x20   VFINDER_WEBVIEW_DEBUG=1   Enable WebKitGTK console and load/process diagnostics",
+        version = env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn handle_cli_info_flags() {
+    for arg in std::env::args().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_cli_help();
+                std::process::exit(0);
+            }
+            "-v" | "--version" => {
+                println!("vFinder {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn main() {
+    handle_cli_info_flags();
+
     #[cfg(target_os = "linux")]
     {
         // Disable FreeType stem darkening on Linux.

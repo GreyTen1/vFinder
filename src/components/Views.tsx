@@ -423,7 +423,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
     onRenameSubmit,
     onRenameCancel,
   }) => {
-    const maxW = Math.max(120, iconSize + 44);
+    const maxW = Math.max(96, iconSize + 44);
     const showFullName = isSelected;
     return (
       <div
@@ -442,7 +442,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
           maxWidth: maxW,
           ...virtualStyle,
         }}
-        className={`group flex flex-col items-center p-1.5 rounded-xl cursor-default w-full ${
+        className={`group flex flex-col items-center p-1.5 rounded-xl cursor-default w-full min-w-0 ${
           entry.isHidden ? "opacity-55" : ""
         } ${isBeingDragged ? "opacity-45" : ""} ${
           isDropTarget ? "ring-2 ring-[#0a84ff] bg-[#0a84ff]/20" : ""
@@ -564,6 +564,8 @@ export const IconView: React.FC<CommonViewProps> = ({
   const [gridViewport, setGridViewport] = useState({ width: 0, height: 0, top: 0 });
   const gridScrollFrameRef = useRef<number | null>(null);
   const cellWidth = Math.max(96, iconSize + 44);
+  const itemHeight = iconSize + 53;
+  const rowPitch = itemHeight + 20;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
 
@@ -598,21 +600,58 @@ export const IconView: React.FC<CommonViewProps> = ({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const updateSize = () => {
+    let throttleTimer: number | null = null;
+    let lastMeasureTime = 0;
+    const THROTTLE_MS = 80;
+
+    const getCols = (w: number) =>
+      Math.max(1, Math.floor((Math.max(0, w - 40) + 12) / (cellWidth + 12)));
+    const getRows = (h: number) => Math.ceil(h / rowPitch);
+
+    const applySize = () => {
+      lastMeasureTime = performance.now();
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      const top = container.scrollTop;
       setGridViewport((current) => {
-        const width = container.clientWidth;
-        const height = container.clientHeight;
-        const top = container.scrollTop;
-        return current.width === width && current.height === height && current.top === top
-          ? current
-          : { width, height, top };
+        if (
+          current.width > 0 &&
+          getCols(current.width) === getCols(width) &&
+          getRows(current.height) === getRows(height) &&
+          current.top === top
+        ) {
+          return current;
+        }
+        return { width, height, top };
       });
     };
-    updateSize();
-    const observer = new ResizeObserver(updateSize);
+
+    const scheduleUpdate = () => {
+      const elapsed = performance.now() - lastMeasureTime;
+      if (elapsed >= THROTTLE_MS) {
+        if (throttleTimer !== null) {
+          window.clearTimeout(throttleTimer);
+          throttleTimer = null;
+        }
+        applySize();
+      } else if (throttleTimer === null) {
+        throttleTimer = window.setTimeout(() => {
+          throttleTimer = null;
+          applySize();
+        }, THROTTLE_MS - elapsed);
+      }
+    };
+
+    applySize();
+    const observer = new ResizeObserver(scheduleUpdate);
     observer.observe(container);
-    return () => observer.disconnect();
-  }, []);
+    return () => {
+      if (throttleTimer !== null) {
+        window.clearTimeout(throttleTimer);
+      }
+      observer.disconnect();
+    };
+  }, [cellWidth, rowPitch]);
 
   const handleGridScroll = useCallback(() => {
     if (gridScrollFrameRef.current !== null) return;
@@ -644,11 +683,11 @@ export const IconView: React.FC<CommonViewProps> = ({
   // exists in the DOM and can be centered before virtualization resumes.
   const isLargeGrid = entries.length > ICON_VIRTUALIZATION_THRESHOLD && !revealPath;
   const contentWidth = Math.max(0, gridViewport.width - 40);
-  const columnCount = isLargeGrid
-    ? Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)))
-    : 1;
-  const itemHeight = iconSize + 53;
-  const rowPitch = itemHeight + 20;
+  const rawColumnCount = Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)));
+  const columnCount = isLargeGrid ? rawColumnCount : 1;
+  const displayColumnCount = isLargeGrid
+    ? rawColumnCount
+    : Math.min(Math.max(1, entries.length), rawColumnCount);
   const rowCount = Math.ceil(entries.length / columnCount);
   const firstVisibleRow = isLargeGrid
     ? Math.max(0, Math.floor((gridViewport.top - 20) / rowPitch) - 3)
@@ -694,11 +733,12 @@ export const IconView: React.FC<CommonViewProps> = ({
         </div>
       ) : (
         <div
-          className="grid gap-y-5 gap-x-3 justify-items-center"
+          className="grid gap-y-5 gap-x-3 justify-start justify-items-center"
           style={{
-            gridTemplateColumns: isLargeGrid
-              ? `repeat(${columnCount}, minmax(${cellWidth}px, 1fr))`
-              : `repeat(auto-fill, minmax(${cellWidth}px, 1fr))`,
+            gridTemplateColumns:
+              gridViewport.width > 0
+                ? `repeat(${displayColumnCount}, ${cellWidth}px)`
+                : `repeat(auto-fill, ${cellWidth}px)`,
             ...(isLargeGrid ? { gridAutoRows: `${itemHeight}px` } : {}),
           }}
         >
@@ -1576,11 +1616,13 @@ interface ColumnPane {
   selectedEntry: FileEntry | null;
 }
 
-const ColumnPaneRow: React.FC<{
+const COLUMN_VIRTUALIZATION_THRESHOLD = 80;
+
+interface ColumnPaneRowProps {
   entry: FileEntry;
   colIdx: number;
+  rowHeight: number;
   colFontSize: number;
-  rowPadY: number;
   colIconSize: number;
   isSelected: boolean;
   isRenaming: boolean;
@@ -1591,30 +1633,21 @@ const ColumnPaneRow: React.FC<{
   onRenameChange?: (val: string) => void;
   onRenameSubmit?: () => void;
   onRenameCancel?: () => void;
-  onActivateEntry: (
-    colIdx: number,
-    entry: FileEntry,
-    modifiers: SelectionModifiers
-  ) => void;
   onOpenEntry: (entry: FileEntry) => void;
   onContextMenu: (
     e: React.MouseEvent,
     entry?: FileEntry,
     targetDir?: string
   ) => void;
-  onStartItemDrag: (
-    e: React.MouseEvent,
-    entry: FileEntry,
-    orderedEntries?: FileEntry[],
-    onClickOverride?: (entry: FileEntry, modifiers: SelectionModifiers) => void
-  ) => void;
-  colEntries: FileEntry[];
+  onStartRowDrag: (e: React.MouseEvent, entry: FileEntry) => void;
+  onPrefetchDir: (dirPath: string) => void;
   colPath: string;
-}> = ({
+}
+
+const ColumnPaneRow = React.memo<ColumnPaneRowProps>(({
   entry,
-  colIdx,
+  rowHeight,
   colFontSize,
-  rowPadY,
   colIconSize,
   isSelected,
   isRenaming,
@@ -1625,11 +1658,10 @@ const ColumnPaneRow: React.FC<{
   onRenameChange,
   onRenameSubmit,
   onRenameCancel,
-  onActivateEntry,
   onOpenEntry,
   onContextMenu,
-  onStartItemDrag,
-  colEntries,
+  onStartRowDrag,
+  onPrefetchDir,
   colPath,
 }) => {
   const rowRef = useRef<HTMLDivElement>(null);
@@ -1643,23 +1675,21 @@ const ColumnPaneRow: React.FC<{
   return (
     <div
       ref={rowRef}
-      key={entry.path}
       data-entry-path={entry.path}
       data-drop-path={entry.isDir ? entry.path : undefined}
       data-drop-name={entry.isDir ? entry.name : undefined}
       style={{
+        height: rowHeight,
         fontSize: `${colFontSize}px`,
-        paddingTop: rowPadY,
-        paddingBottom: rowPadY,
+      }}
+      onMouseEnter={() => {
+        if (entry.isDir) {
+          onPrefetchDir(entry.path);
+        }
       }}
       onMouseDown={(e) => {
         if (!isRenaming && isSelected && !e.ctrlKey && !e.shiftKey) {
-          onStartItemDrag(
-            e,
-            entry,
-            colEntries,
-            (clicked, mods) => onActivateEntry(colIdx, clicked, mods)
-          );
+          onStartRowDrag(e, entry);
         }
       }}
       onDoubleClick={() => {
@@ -1687,12 +1717,7 @@ const ColumnPaneRow: React.FC<{
         data-drag-handle={!isRenaming ? "true" : undefined}
         onMouseDown={(e) => {
           if (!isRenaming) {
-            onStartItemDrag(
-              e,
-              entry,
-              colEntries,
-              (clicked, mods) => onActivateEntry(colIdx, clicked, mods)
-            );
+            onStartRowDrag(e, entry);
           }
         }}
         className="flex items-center gap-2 min-w-0 flex-1 mr-1"
@@ -1731,9 +1756,9 @@ const ColumnPaneRow: React.FC<{
       </div>
     </div>
   );
-};
+});
 
-const ColumnPaneView: React.FC<{
+const ColumnPaneView = React.memo<{
   col: ColumnPane;
   colIdx: number;
   rootPartitionName?: string;
@@ -1753,6 +1778,7 @@ const ColumnPaneView: React.FC<{
     entry: FileEntry,
     modifiers: SelectionModifiers
   ) => void;
+  onPrefetchDir: (dirPath: string) => void;
   onSetSelection: (paths: string[]) => void;
   onClearSelection: () => void;
   onOpenEntry: (entry: FileEntry) => void;
@@ -1767,7 +1793,7 @@ const ColumnPaneView: React.FC<{
     orderedEntries?: FileEntry[],
     onClickOverride?: (entry: FileEntry, modifiers: SelectionModifiers) => void
   ) => void;
-}> = ({
+}>(({
   col,
   colIdx,
   rootPartitionName,
@@ -1783,6 +1809,7 @@ const ColumnPaneView: React.FC<{
   onRenameCancel,
   onFocusColumn,
   onActivateEntry,
+  onPrefetchDir,
   onSetSelection,
   onClearSelection,
   onOpenEntry,
@@ -1790,6 +1817,9 @@ const ColumnPaneView: React.FC<{
   onStartItemDrag,
 }) => {
   const paneRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(600);
+  const scrollFrameRef = useRef<number | null>(null);
 
   const zoomScale = iconSize / 64;
   const colIconSize = Math.max(14, Math.min(32, Math.round(18 * zoomScale)));
@@ -1802,15 +1832,31 @@ const ColumnPaneView: React.FC<{
     Math.min(360, Math.round(256 * (0.8 + 0.2 * zoomScale)))
   );
   const rowPadY = Math.max(4, Math.min(10, Math.round(6 * zoomScale)));
+  const rowHeight = Math.max(24, colIconSize + rowPadY * 2);
+
+  const colEntriesRef = useRef<FileEntry[]>(col.entries);
+  colEntriesRef.current = col.entries;
 
   const handleClickEntryByPath = useCallback(
     (path: string, modifiers: SelectionModifiers) => {
-      const found = col.entries.find((e) => e.path === path);
+      const found = colEntriesRef.current.find((e) => e.path === path);
       if (found) {
         onActivateEntry(colIdx, found, modifiers);
       }
     },
-    [col.entries, colIdx, onActivateEntry]
+    [colIdx, onActivateEntry]
+  );
+
+  const handleStartRowDrag = useCallback(
+    (e: React.MouseEvent, entry: FileEntry) => {
+      onStartItemDrag(
+        e,
+        entry,
+        colEntriesRef.current,
+        (clicked, mods) => onActivateEntry(colIdx, clicked, mods)
+      );
+    },
+    [colIdx, onActivateEntry, onStartItemDrag]
   );
 
   const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
@@ -1865,12 +1911,60 @@ const ColumnPaneView: React.FC<{
     return col.entries;
   }, [col.entries, col.path, renamingPath, renameValue]);
 
+  const isLargeColumn = displayEntries.length > COLUMN_VIRTUALIZATION_THRESHOLD;
+
+  useEffect(() => {
+    if (!isLargeColumn) return;
+    const container = paneRef.current;
+    if (!container) return;
+    const updateMetrics = () => {
+      setViewportHeight(container.clientHeight);
+      setScrollTop(container.scrollTop);
+    };
+    updateMetrics();
+    const observer = new ResizeObserver(updateMetrics);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [isLargeColumn]);
+
+  const handlePaneScroll = useCallback(() => {
+    if (!isLargeColumn || scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      setScrollTop(paneRef.current?.scrollTop || 0);
+    });
+  }, [isLargeColumn]);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) {
+        cancelAnimationFrame(scrollFrameRef.current);
+      }
+    },
+    []
+  );
+
+  const overscan = 10;
+  const firstVisibleRow = isLargeColumn
+    ? Math.max(0, Math.floor(scrollTop / rowHeight) - overscan)
+    : 0;
+  const lastVisibleRow = isLargeColumn
+    ? Math.min(
+        displayEntries.length,
+        Math.ceil((scrollTop + viewportHeight) / rowHeight) + overscan
+      )
+    : displayEntries.length;
+  const visibleSlice = isLargeColumn
+    ? displayEntries.slice(firstVisibleRow, lastVisibleRow)
+    : displayEntries;
+
   return (
     <div
       ref={paneRef}
       style={{ width: colWidth }}
       data-drop-path={col.path !== "__RECENTS__" ? col.path : undefined}
       data-drop-name={colFolderName}
+      onScroll={isLargeColumn ? handlePaneScroll : undefined}
       onMouseDown={(e) => {
         onFocusColumn?.(colIdx);
         handleContainerMouseDown(e);
@@ -1888,35 +1982,79 @@ const ColumnPaneView: React.FC<{
         <div className="h-full flex items-center justify-center text-xs opacity-40 pointer-events-none">
           Empty Folder
         </div>
+      ) : isLargeColumn ? (
+        <div
+          className="relative w-full"
+          style={{ height: displayEntries.length * rowHeight }}
+        >
+          {visibleSlice.map((entry, idx) => {
+            const rowIndex = firstVisibleRow + idx;
+            const isRenamingRow = renamingPath === entry.path;
+            return (
+              <div
+                key={entry.path}
+                className="absolute inset-x-0"
+                style={{ top: rowIndex * rowHeight, height: rowHeight }}
+              >
+                <ColumnPaneRow
+                  entry={entry}
+                  colIdx={colIdx}
+                  rowHeight={rowHeight}
+                  colFontSize={colFontSize}
+                  colIconSize={colIconSize}
+                  isSelected={
+                    selectedSet.has(entry.path) ||
+                    col.selectedEntry?.path === entry.path
+                  }
+                  isRenaming={isRenamingRow}
+                  isDropTarget={entry.isDir && dropTargetPath === entry.path}
+                  isBeingDragged={draggedSet.has(entry.path)}
+                  darkMode={darkMode}
+                  renameValue={isRenamingRow ? renameValue : undefined}
+                  onRenameChange={onRenameChange}
+                  onRenameSubmit={onRenameSubmit}
+                  onRenameCancel={onRenameCancel}
+                  onOpenEntry={onOpenEntry}
+                  onContextMenu={onContextMenu}
+                  onStartRowDrag={handleStartRowDrag}
+                  onPrefetchDir={onPrefetchDir}
+                  colPath={col.path}
+                />
+              </div>
+            );
+          })}
+        </div>
       ) : (
-        displayEntries.map((entry) => (
-          <ColumnPaneRow
-            key={entry.path}
-            entry={entry}
-            colIdx={colIdx}
-            colFontSize={colFontSize}
-            rowPadY={rowPadY}
-            colIconSize={colIconSize}
-            isSelected={
-              selectedSet.has(entry.path) ||
-              col.selectedEntry?.path === entry.path
-            }
-            isRenaming={renamingPath === entry.path}
-            isDropTarget={entry.isDir && dropTargetPath === entry.path}
-            isBeingDragged={draggedSet.has(entry.path)}
-            darkMode={darkMode}
-            renameValue={renameValue}
-            onRenameChange={onRenameChange}
-            onRenameSubmit={onRenameSubmit}
-            onRenameCancel={onRenameCancel}
-            onActivateEntry={onActivateEntry}
-            onOpenEntry={onOpenEntry}
-            onContextMenu={onContextMenu}
-            onStartItemDrag={onStartItemDrag}
-            colEntries={col.entries}
-            colPath={col.path}
-          />
-        ))
+        displayEntries.map((entry) => {
+          const isRenamingRow = renamingPath === entry.path;
+          return (
+            <ColumnPaneRow
+              key={entry.path}
+              entry={entry}
+              colIdx={colIdx}
+              rowHeight={rowHeight}
+              colFontSize={colFontSize}
+              colIconSize={colIconSize}
+              isSelected={
+                selectedSet.has(entry.path) ||
+                col.selectedEntry?.path === entry.path
+              }
+              isRenaming={isRenamingRow}
+              isDropTarget={entry.isDir && dropTargetPath === entry.path}
+              isBeingDragged={draggedSet.has(entry.path)}
+              darkMode={darkMode}
+              renameValue={isRenamingRow ? renameValue : undefined}
+              onRenameChange={onRenameChange}
+              onRenameSubmit={onRenameSubmit}
+              onRenameCancel={onRenameCancel}
+              onOpenEntry={onOpenEntry}
+              onContextMenu={onContextMenu}
+              onStartRowDrag={handleStartRowDrag}
+              onPrefetchDir={onPrefetchDir}
+              colPath={col.path}
+            />
+          );
+        })
       )}
 
       {marqueeRect && (
@@ -1932,7 +2070,7 @@ const ColumnPaneView: React.FC<{
       )}
     </div>
   );
-};
+});
 
 export const ColumnView: React.FC<
   CommonViewProps & {
@@ -1961,11 +2099,14 @@ export const ColumnView: React.FC<
   onRenameCancel,
   iconSize,
   darkMode,
+  sortField,
+  sortDirection,
   showHidden,
   onToggleTag,
   onQuickLook,
   onActiveDirectoryChange,
 }) => {
+  const columnsContainerRef = useRef<HTMLDivElement>(null);
   const [columns, setColumns] = useState<ColumnPane[]>(() => [
     {
       path: currentPath,
@@ -1975,6 +2116,46 @@ export const ColumnView: React.FC<
   ]);
   const columnsRef = useRef<ColumnPane[]>(columns);
   columnsRef.current = columns;
+
+  const prefetchedMapRef = useRef<Map<string, FileEntry[]>>(new Map());
+  const inflightDirsRef = useRef<Set<string>>(new Set());
+  const selectReqIdRef = useRef(0);
+
+  const prefetchDir = useCallback(
+    (dirPath: string) => {
+      if (
+        prefetchedMapRef.current.has(dirPath) ||
+        inflightDirsRef.current.has(dirPath)
+      ) {
+        return;
+      }
+      inflightDirsRef.current.add(dirPath);
+      apiReadDirectory(dirPath, showHidden)
+        .then((children) => {
+          prefetchedMapRef.current.set(dirPath, children);
+        })
+        .catch(() => {
+          prefetchedMapRef.current.set(dirPath, []);
+        })
+        .finally(() => {
+          inflightDirsRef.current.delete(dirPath);
+        });
+    },
+    [showHidden]
+  );
+
+  // Warm prefetch cache with top-level folders of the newest column after paint
+  const newestColumnEntries = columns[columns.length - 1]?.entries;
+  useEffect(() => {
+    if (!newestColumnEntries || newestColumnEntries.length === 0) return;
+    const timer = window.setTimeout(() => {
+      const dirs = newestColumnEntries.filter((e) => e.isDir).slice(0, 20);
+      for (const d of dirs) {
+        prefetchDir(d.path);
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [newestColumnEntries, prefetchDir]);
 
   const [activeColIndex, setActiveColIndex] = useState<number>(0);
   const [preview, setPreview] = useState<FilePreview | null>(null);
@@ -2013,21 +2194,43 @@ export const ColumnView: React.FC<
           },
         ];
       }
+      if (prev[0].entries === entries) return prev;
       const next = [...prev];
       next[0] = { ...next[0], entries };
       return next;
     });
   }, [currentPath, entries]);
 
+  // Re-sort open sub-columns when sortField or sortDirection changes
+  useEffect(() => {
+    setColumns((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.map((col, idx) =>
+        idx === 0
+          ? col
+          : {
+              ...col,
+              entries: sortEntriesList(col.entries, sortField, sortDirection),
+            }
+      );
+    });
+  }, [sortField, sortDirection]);
+
   // Refresh sub-columns when files are moved/copied/created/renamed
   useEffect(() => {
+    inflightDirsRef.current.clear();
+    prefetchedMapRef.current.clear();
     if (columnsRef.current.length <= 1) return;
     let cancelled = false;
     Promise.all(
       columnsRef.current.slice(1).map(async (col) => {
         try {
           const sub = await apiReadDirectory(col.path, showHidden);
-          return { path: col.path, entries: sub };
+          prefetchedMapRef.current.set(col.path, sub);
+          return {
+            path: col.path,
+            entries: sortEntriesList(sub, sortField, sortDirection),
+          };
         } catch {
           return null;
         }
@@ -2051,7 +2254,7 @@ export const ColumnView: React.FC<
     return () => {
       cancelled = true;
     };
-  }, [refreshVersion, showHidden]);
+  }, [refreshVersion, showHidden, sortField, sortDirection]);
 
   const handleFocusColumn = useCallback(
     (colIdx: number) => {
@@ -2074,7 +2277,8 @@ export const ColumnView: React.FC<
       entry: FileEntry,
       modifiers: SelectionModifiers
     ) => {
-      const colEntries = columns[colIndex]?.entries || [];
+      const currentColumns = columnsRef.current;
+      const colEntries = currentColumns[colIndex]?.entries || [];
       onSelect(entry, modifiers, colEntries);
 
       // If multi-selecting with Ctrl/Cmd or Shift, keep current column cascade
@@ -2082,7 +2286,8 @@ export const ColumnView: React.FC<
         return;
       }
 
-      const updated = columns.slice(0, colIndex + 1);
+      const reqId = ++selectReqIdRef.current;
+      const updated = currentColumns.slice(0, colIndex + 1);
       updated[colIndex] = {
         ...updated[colIndex],
         selectedEntry: entry,
@@ -2091,29 +2296,74 @@ export const ColumnView: React.FC<
       if (entry.isDir) {
         setPreview(null);
         setActiveColIndex(colIndex + 1);
+
+        const cachedSub = prefetchedMapRef.current.get(entry.path);
+        if (cachedSub !== undefined) {
+          const sortedSub = sortEntriesList(cachedSub, sortField, sortDirection);
+          const nextCols = [
+            ...updated,
+            {
+              path: entry.path,
+              entries: sortedSub,
+              selectedEntry: null,
+            },
+          ];
+          columnsRef.current = nextCols;
+          setColumns(nextCols);
+          requestAnimationFrame(() => {
+            if (columnsContainerRef.current) {
+              columnsContainerRef.current.scrollLeft =
+                columnsContainerRef.current.scrollWidth;
+            }
+          });
+          return;
+        }
+
+        // Immediately reflect folder selection in the clicked column while loading sub-column
+        columnsRef.current = updated;
+        setColumns(updated);
+
         try {
           const subEntries = await apiReadDirectory(entry.path, showHidden);
-          updated.push({
-            path: entry.path,
-            entries: subEntries,
-            selectedEntry: null,
+          prefetchedMapRef.current.set(entry.path, subEntries);
+          if (selectReqIdRef.current !== reqId) return;
+          const sortedSub = sortEntriesList(subEntries, sortField, sortDirection);
+          const nextCols = [
+            ...updated,
+            {
+              path: entry.path,
+              entries: sortedSub,
+              selectedEntry: null,
+            },
+          ];
+          columnsRef.current = nextCols;
+          setColumns(nextCols);
+          requestAnimationFrame(() => {
+            if (columnsContainerRef.current) {
+              columnsContainerRef.current.scrollLeft =
+                columnsContainerRef.current.scrollWidth;
+            }
           });
         } catch {
           // unreadable dir
         }
-        setColumns(updated);
       } else {
         setActiveColIndex(colIndex);
+        columnsRef.current = updated;
         setColumns(updated);
         try {
           const p = await apiReadFilePreview(entry.path, 32768);
-          setPreview(p);
+          if (selectReqIdRef.current === reqId) {
+            setPreview(p);
+          }
         } catch {
-          setPreview(null);
+          if (selectReqIdRef.current === reqId) {
+            setPreview(null);
+          }
         }
       }
     },
-    [columns, onSelect, showHidden]
+    [onSelect, showHidden, sortField, sortDirection]
   );
 
   const activeFile =
@@ -2139,6 +2389,7 @@ export const ColumnView: React.FC<
 
   return (
     <div
+      ref={columnsContainerRef}
       data-tab-scroll-view="columns"
       onDragStart={(e) => e.preventDefault()}
       className="macos-layer-isolate flex-1 flex overflow-x-auto overflow-y-hidden"
@@ -2161,6 +2412,7 @@ export const ColumnView: React.FC<
           onRenameCancel={onRenameCancel}
           onFocusColumn={handleFocusColumn}
           onActivateEntry={handleSelectInColumn}
+          onPrefetchDir={prefetchDir}
           onSetSelection={onSetSelection}
           onClearSelection={onClearSelection}
           onOpenEntry={onOpenEntry}
@@ -2398,7 +2650,10 @@ export const GalleryView: React.FC<CommonViewProps> = ({
 
   if (!activeEntry) {
     return (
-      <div className="flex-1 flex items-center justify-center opacity-40 text-sm">
+      <div
+        onContextMenu={(e) => onContextMenu(e, undefined)}
+        className="flex-1 flex items-center justify-center opacity-40 text-sm"
+      >
         This folder is empty
       </div>
     );
@@ -2407,6 +2662,7 @@ export const GalleryView: React.FC<CommonViewProps> = ({
   return (
     <div
       onDragStart={(e) => e.preventDefault()}
+      onContextMenu={(e) => onContextMenu(e, undefined)}
       className="macos-layer-isolate flex-1 flex overflow-hidden select-none"
     >
       {/* Main Stage + Bottom Filmstrip */}

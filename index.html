@@ -7,8 +7,8 @@
     <link rel="icon" type="image/png" href="/vFinder.png" />
     <style>
       html, body, #root {
-        background-color: #1e1e22 !important;
-        color: #f4f4f5;
+        background-color: #f2f2f5;
+        color: #18181b;
         margin: 0;
         padding: 0;
         width: 100%;
@@ -16,9 +16,24 @@
         overflow: hidden;
         touch-action: pan-x pan-y;
       }
+      @media (prefers-color-scheme: dark) {
+        html, body, #root {
+          background-color: #1e1e22;
+          color: #f4f4f5;
+        }
+      }
     </style>
     <script>
       (function() {
+        try {
+          var mode = localStorage.getItem("finder-theme-mode") || "system";
+          var isDark = mode === "dark" || (mode === "system" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          var bg = isDark ? "#202024" : "#f2f2f5";
+          var fg = isDark ? "#f4f4f5" : "#18181b";
+          document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+          document.documentElement.style.backgroundColor = bg;
+          document.documentElement.style.color = fg;
+        } catch (_) {}
         function blockPinch(e) {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
@@ -43,7 +58,7 @@
       })();
     </script>
   </head>
-  <body class="select-none overflow-hidden bg-[#1e1e22] antialiased">
+  <body class="select-none overflow-hidden antialiased">
     <svg width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden;pointer-events:none" aria-hidden="true">
       <defs>
         <linearGradient id="macos-folder-back" x1="32" y1="8" x2="32" y2="30" gradientUnits="userSpaceOnUse">
