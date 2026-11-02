@@ -33,85 +33,13 @@ There's an appImage that bundles necessary libraries.
 Also, dependencies are handled automatically if installed using the correct release according to your distro (.deb, .rpm, .pkg).
 But if you want to know a bit more about what's being installed on your device, there's a list below so you can check!
 
-Ubuntu (26.04 LTS, 25.04 LTS, 24,04 LTS) 
-
-Dependencies:
-
-    sudo apt install -y \
-      libwebkit2gtk-4.1-0 \
-      libgtk-3-0 \
-      libsoup-3.0-0 \
-      udisks2 \
-      util-linux \
-      sudo \
-      which \
-      curl \
-      dosfstools \
-      exfatprogs \
-      e2fsprogs \
-      btrfs-progs \
-      ntfs-3g
+Ubuntu (26.04 LTS, 25.04 LTS, 24.04 LTS, 23.04 LTS, 22.04 LTS) ☑️ tested
 
 Debian (13, 12) ☑️ tested
 
-Runtime dependencies:
-
-    sudo apt install -y \
-      libwebkit2gtk-4.1-0 \
-      libgtk-3-0 \
-      libsoup-3.0-0 \
-      udisks2 \
-      util-linux \
-      sudo \
-      which \
-      curl \
-      dosfstools \
-      exfatprogs \
-      e2fsprogs \
-      btrfs-progs \
-      ntfs-3g
-
 Arch and derivatives ☑️ tested
 
-    sudo pacman -S --needed \
-      webkit2gtk-4.1 \
-      gtk3 \
-      libsoup3 \
-      gstreamer \
-      gst-plugins-base \
-      gst-plugins-good \
-      gst-plugins-bad \
-      gst-plugins-ugly \
-      gst-libav \
-      udisks2 \
-      util-linux \
-      sudo \
-      which \
-      curl \
-      dosfstools \
-      exfatprogs \
-      e2fsprogs \
-      btrfs-progs \
-      ntfs-3g
-
-Fedora (not yet tested)
-
-Runtime dependencies:
-
-    sudo dnf install -y \
-      webkit2gtk4.1 \
-      gtk3 \
-      libsoup3 \
-      udisks2 \
-      util-linux \
-      sudo \
-      which \
-      curl \
-      dosfstools \
-      exfatprogs \
-      e2fsprogs \
-      btrfs-progs \
-      ntfs-3g
+Fedora ☑️ tested
 
 ### Archive support
 
