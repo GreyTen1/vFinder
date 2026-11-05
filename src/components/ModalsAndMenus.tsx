@@ -851,7 +851,9 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   const left = Math.max(10, Math.min(menu.x, window.innerWidth - 240));
 
   const itemCls =
-    "w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md hover:bg-[#0a84ff] hover:text-white transition cursor-pointer";
+    "w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md hover:bg-[#0a84ff] hover:text-white cursor-pointer select-none";
+  const dangerItemCls =
+    "w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white cursor-pointer select-none";
 
   return (
     <div
@@ -868,10 +870,10 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         ref={menuRef}
         onClick={(e) => e.stopPropagation()}
         style={{ top, left }}
-        className={`fixed min-w-60 w-auto max-w-xs p-1.5 rounded-xl border shadow-2xl backdrop-blur-2xl text-xs select-none ${
+        className={`fixed min-w-60 w-auto max-w-xs p-1.5 rounded-xl border shadow-2xl text-xs select-none macos-layer-isolate ${
           darkMode
-            ? "bg-[#2b2b30]/95 border-white/15 text-zinc-100"
-            : "bg-white/95 border-black/15 text-zinc-800"
+            ? "bg-[#28282d] border-white/15 text-zinc-100"
+            : "bg-[#fafafc] border-black/15 text-zinc-800"
         }`}
       >
         {volume ? (
@@ -971,7 +973,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                     onFormatVolume?.(volume);
                     onClose();
                   }}
-                  className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer"
+                  className={dangerItemCls}
                 >
                   <Eraser className="w-3.5 h-3.5" />
                   <span>Erase / Format...</span>
@@ -1021,7 +1023,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                     onEmptyTrash?.();
                     onClose();
                   }}
-                  className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+                  className={`${dangerItemCls} disabled:opacity-40 disabled:pointer-events-none`}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Empty Trash…</span>
@@ -1061,7 +1063,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 onRemoveFavorite?.(favorite.path);
                 onClose();
               }}
-              className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer"
+              className={dangerItemCls}
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Remove from Sidebar</span>
@@ -1132,7 +1134,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 onDeletePermanently?.(isMultiSelected ? undefined : entry);
                 onClose();
               }}
-              className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer"
+              className={dangerItemCls}
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Delete Immediately…{countSuffix}</span>
@@ -1143,6 +1145,12 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           <>
             {(() => {
               const lowerExt = (entry.extension || "").toLowerCase();
+              const isShellScript =
+                !entry.isDir &&
+                ["sh", "bash", "zsh"].includes(lowerExt);
+              const isScript =
+                !entry.isDir &&
+                ["sh", "bash", "zsh", "command", "py"].includes(lowerExt);
               const isExec =
                 !entry.isDir &&
                 (Boolean(entry.isExecutable) ||
@@ -1151,14 +1159,15 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                   lowerExt === "desktop" ||
                   lowerExt === "bin" ||
                   lowerExt === "run");
-              const isScript =
-                !entry.isDir &&
-                ["sh", "bash", "zsh", "command", "py"].includes(lowerExt);
-              const canRun = isExec || isScript;
+              const canRunInTerminal =
+                !entry.isDir && (isExec || isScript);
+              // Direct run is for AppImages, Desktop files, and native binaries, but NOT shell scripts
+              const canRunDirect =
+                !entry.isDir && isExec && !isShellScript;
 
               return (
                 <>
-                  {!isMultiSelected && canRun && onRun && (
+                  {!isMultiSelected && canRunDirect && onRun && (
                     <button
                       onClick={() => {
                         onRun(entry);
@@ -1166,17 +1175,15 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                       }}
                       className={itemCls}
                     >
-                      <Play className="w-3.5 h-3.5 text-emerald-500 fill-emerald-500/20" />
+                      <Play className="w-3.5 h-3.5 shrink-0" />
                       <span className="font-medium truncate">
                         {lowerExt === "desktop"
                           ? "Launch Application"
-                          : isScript
-                          ? "Run as Program"
                           : "Run"}
                       </span>
                     </button>
                   )}
-                  {!isMultiSelected && canRun && onRunInTerminal && (
+                  {!isMultiSelected && canRunInTerminal && onRunInTerminal && (
                     <button
                       onClick={() => {
                         onRunInTerminal(entry);
@@ -1184,7 +1191,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                       }}
                       className={itemCls}
                     >
-                      <Terminal className="w-3.5 h-3.5 text-emerald-500" />
+                      <Terminal className="w-3.5 h-3.5 shrink-0" />
                       <span>Run in Terminal</span>
                     </button>
                   )}
@@ -1199,7 +1206,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                         }}
                         className={itemCls}
                       >
-                        <CheckCircle2 className="w-3.5 h-3.5 text-blue-500" />
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                         <span>Allow Executing as Program</span>
                       </button>
                     )}
@@ -1213,7 +1220,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               }}
               className={itemCls}
             >
-              <ExternalLink className="w-3.5 h-3.5" />
+              <ExternalLink className="w-3.5 h-3.5 shrink-0" />
               <span className="font-medium truncate">
                 {!isMultiSelected && entry.defaultApp
                   ? `Open with “${entry.defaultApp}”`
@@ -1378,7 +1385,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 onTrash(isMultiSelected ? undefined : entry);
                 onClose();
               }}
-              className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition"
+              className={dangerItemCls}
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Move to Trash{countSuffix}</span>
@@ -1405,7 +1412,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 onEmptyTrash?.();
                 onClose();
               }}
-              className="w-full px-3 py-1.5 text-left flex items-center gap-2.5 rounded-md text-[#ff453a] hover:bg-[#ff453a] hover:text-white transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+              className={`${dangerItemCls} disabled:opacity-40 disabled:pointer-events-none`}
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Empty Trash…</span>
