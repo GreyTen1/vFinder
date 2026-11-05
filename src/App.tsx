@@ -144,6 +144,13 @@ export function findArchiveRootFromPath(path: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
+export function isPathInsideArchive(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
+  const root = findArchiveRootFromPath(path)?.replace(/\\/g, "/").replace(/\/$/, "");
+  if (!root) return false;
+  return normalized.length > root.length && normalized.startsWith(`${root}/`);
+}
+
 interface ActiveDragState {
   paths: string[];
   primaryEntry: FileEntry;
@@ -1880,7 +1887,7 @@ export const App: React.FC = () => {
 
   const startRename = useCallback(
     (entry: FileEntry) => {
-      if (isArchiveWorkspace || findArchiveRootFromPath(entry.path)) {
+      if (isArchiveWorkspace || isPathInsideArchive(entry.path)) {
         showToast("Cannot rename items: archives are read-only");
         return;
       }
@@ -1948,17 +1955,18 @@ export const App: React.FC = () => {
                       : `${splitPane.path}/`
                   ))))
         );
+        const isSplitWorkspace = Boolean(
+          splitPane &&
+            (splitPane.archiveWorkspaceRoot ||
+              (splitPane.path && findArchiveRootFromPath(splitPane.path)))
+        );
+        const isPrimaryWorkspace = Boolean(
+          isArchiveWorkspace ||
+            (activeTab?.path && findArchiveRootFromPath(activeTab.path))
+        );
         const isArchive = isTargetInSplit
-          ? Boolean(
-              splitPane?.archiveWorkspaceRoot ||
-                (splitPane?.path && findArchiveRootFromPath(splitPane.path)) ||
-                findArchiveRootFromPath(targetEntry.path)
-            )
-          : Boolean(
-              isArchiveWorkspace ||
-                (activeTab?.path && findArchiveRootFromPath(activeTab.path)) ||
-                findArchiveRootFromPath(targetEntry.path)
-            );
+          ? (isSplitWorkspace || isPathInsideArchive(targetEntry.path))
+          : (isPrimaryWorkspace || isPathInsideArchive(targetEntry.path));
         return {
           isSplit: isTargetInSplit,
           targets: [targetEntry.path],
@@ -1982,13 +1990,13 @@ export const App: React.FC = () => {
       }
 
       if (isSplit && splitPane) {
-        const isArchive = Boolean(
+        const isSplitWorkspace = Boolean(
           splitPane.archiveWorkspaceRoot ||
-            (splitPane.path && findArchiveRootFromPath(splitPane.path)) ||
-            splitPaneSelectedPathsRef.current.some((p) =>
-              findArchiveRootFromPath(p)
-            )
+            (splitPane.path && findArchiveRootFromPath(splitPane.path))
         );
+        const isArchive =
+          isSplitWorkspace ||
+          splitPaneSelectedPathsRef.current.some(isPathInsideArchive);
         return {
           isSplit: true,
           targets: splitPaneSelectedPathsRef.current,
@@ -1997,11 +2005,12 @@ export const App: React.FC = () => {
         };
       }
 
-      const isArchive = Boolean(
+      const isPrimaryWorkspace = Boolean(
         isArchiveWorkspace ||
-          (activeTab?.path && findArchiveRootFromPath(activeTab.path)) ||
-          selectedPaths.some((p) => findArchiveRootFromPath(p))
+          (activeTab?.path && findArchiveRootFromPath(activeTab.path))
       );
+      const isArchive =
+        isPrimaryWorkspace || selectedPaths.some(isPathInsideArchive);
       return {
         isSplit: false,
         targets: selectedPaths,
@@ -2136,7 +2145,7 @@ export const App: React.FC = () => {
       const active = getActiveTargets(targetEntry);
       const targets = active.targets;
       if (targets.length === 0) return;
-      if (active.isArchive || (targets[0] && findArchiveRootFromPath(targets[0]))) {
+      if (active.isArchive || targets.some(isPathInsideArchive)) {
         showToast("Cannot delete items: archives are read-only");
         return;
       }
@@ -2225,7 +2234,7 @@ export const App: React.FC = () => {
       const active = getActiveTargets(targetEntry);
       const targets = active.targets;
       if (targets.length === 0) return;
-      if (active.isArchive || (targets[0] && findArchiveRootFromPath(targets[0]))) {
+      if (active.isArchive || targets.some(isPathInsideArchive)) {
         showToast("Cannot delete items: archives are read-only");
         return;
       }
@@ -2301,7 +2310,7 @@ export const App: React.FC = () => {
       const active = getActiveTargets(entry);
       const paths = active.targets;
       if (paths.length === 0) return;
-      if (active.isArchive || paths.some((p) => findArchiveRootFromPath(p))) {
+      if (active.isArchive || paths.some(isPathInsideArchive)) {
         setClipboard({ paths, mode: "copy" });
         showToast(`Copied ${paths.length} item(s)`);
       } else {
@@ -2328,7 +2337,7 @@ export const App: React.FC = () => {
       }
       if (!clipboard || !destDir || destDir === "__RECENTS__" || destDir === "__TRASH__") return;
       try {
-        const isArchiveSource = clipboard.paths.some((p) => findArchiveRootFromPath(p));
+        const isArchiveSource = clipboard.paths.some(isPathInsideArchive);
         if (clipboard.mode === "copy" || isArchiveSource) {
           const created = await runWithActivity(
             `Copying ${clipboard.paths.length} item(s)...`,
@@ -2560,14 +2569,14 @@ export const App: React.FC = () => {
         entry.isDir || draggedEntries.some((item) => item.isDir);
 
       const isArchiveSource = Boolean(
-        isArchiveWorkspace ||
-          findArchiveRootFromPath(entry.path) ||
-          dragPaths.some((p) => findArchiveRootFromPath(p)) ||
-          (startedInSplitPane &&
-            Boolean(
+        (startedInSplitPane
+          ? Boolean(
               splitPane?.archiveWorkspaceRoot ||
                 (splitPane?.path && findArchiveRootFromPath(splitPane.path))
-            ))
+            )
+          : isArchiveWorkspace) ||
+          isPathInsideArchive(entry.path) ||
+          dragPaths.some(isPathInsideArchive)
       );
 
       let isDragging = false;
@@ -3113,7 +3122,7 @@ export const App: React.FC = () => {
           if (validSources.length === 0) return;
 
           try {
-            const isArchiveSource = validSources.some((p) => findArchiveRootFromPath(p));
+            const isArchiveSource = validSources.some(isPathInsideArchive);
             const isFinderMove = !isArchiveSource && (await apiCheckFinderDrag(validSources, true));
             if (isFinderMove) {
               const moved = await runWithActivity(
