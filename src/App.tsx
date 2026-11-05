@@ -43,6 +43,8 @@ import {
   apiMoveItems,
   apiOpenItem,
   apiOpenItemWith,
+  apiRunItem,
+  apiRunItemInTerminal,
   apiPrefetchDirectories,
   apiReadDirectory,
   apiRenameItem,
@@ -1658,12 +1660,18 @@ export const App: React.FC = () => {
       } else {
         try {
           await apiOpenItem(entry.path);
+          if (
+            entry.extension?.toLowerCase() === "appimage" ||
+            !entry.permissions?.slice(1).includes("x")
+          ) {
+            void loadCurrentEntries(true);
+          }
         } catch (err) {
           showToast(`${err}`);
         }
       }
     },
-    [handleBrowseArchive, navigateTo, showToast]
+    [handleBrowseArchive, loadCurrentEntries, navigateTo, showToast]
   );
 
   // File Operations
@@ -4017,17 +4025,54 @@ export const App: React.FC = () => {
     [showToast]
   );
 
+  const handleRunItem = useCallback(
+    async (entry: FileEntry) => {
+      try {
+        await apiRunItem(entry.path);
+        await loadCurrentEntries(true);
+      } catch (err) {
+        showToast(`Could not run file: ${err}`);
+      }
+    },
+    [loadCurrentEntries, showToast]
+  );
+
+  const handleRunItemInTerminal = useCallback(
+    async (entry: FileEntry) => {
+      try {
+        await apiRunItemInTerminal(entry.path);
+        await loadCurrentEntries(true);
+      } catch (err) {
+        showToast(`Could not run in terminal: ${err}`);
+      }
+    },
+    [loadCurrentEntries, showToast]
+  );
+
   const handleSetFileExecutable = useCallback(
     async (path: string, executable: boolean) => {
       try {
         await apiSetFileExecutable(path, executable);
         await loadCurrentEntries(true);
-        setGetInfoEntry(await apiGetFileInfo(path));
+        if (getInfoEntry?.path === path) {
+          setGetInfoEntry(await apiGetFileInfo(path));
+        }
       } catch (error) {
-        showToast(`Could not update executable permission: ${error}`);
+        const msg = String(error);
+        if (msg.includes("AUTH_REQUIRED")) {
+          setSudoPrompt({
+            action: "elevate",
+            volumeName: "",
+            device: "",
+            error: null,
+            busy: false,
+          });
+        } else {
+          showToast(`Could not update executable permission: ${error}`);
+        }
       }
     },
-    [loadCurrentEntries, showToast]
+    [getInfoEntry?.path, loadCurrentEntries, showToast]
   );
 
   const handleCancelRename = useCallback(() => {
@@ -4545,6 +4590,9 @@ export const App: React.FC = () => {
         selectedPaths={selectedPaths}
         onClose={() => setContextMenu(null)}
         onOpen={handleOpenEntry}
+        onRun={handleRunItem}
+        onRunInTerminal={handleRunItemInTerminal}
+        onSetExecutable={handleSetFileExecutable}
         onOpenWith={(entry) => setOpenWithEntry(entry)}
         onQuickLook={(entry) => setQuickLookEntry(entry)}
         onGetInfo={(entry) => {

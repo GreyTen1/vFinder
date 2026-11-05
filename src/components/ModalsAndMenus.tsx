@@ -26,6 +26,8 @@ import {
   Loader2,
   Lock,
   RotateCcw,
+  Play,
+  Terminal,
 } from "lucide-react";
 import {
   FileEntry,
@@ -775,6 +777,9 @@ interface ContextMenuProps {
   onDeletePermanently?: (entry?: FileEntry) => void;
   onEmptyTrash?: () => void;
   trashEmpty?: boolean;
+  onRun?: (entry: FileEntry) => void;
+  onRunInTerminal?: (entry: FileEntry) => void;
+  onSetExecutable?: (path: string, executable: boolean) => Promise<void>;
 }
 
 export const ContextMenu: React.FC<ContextMenuProps> = ({
@@ -782,6 +787,9 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   selectedPaths = [],
   onClose,
   onOpen,
+  onRun,
+  onRunInTerminal,
+  onSetExecutable,
   onOpenWith,
   onQuickLook,
   onGetInfo,
@@ -1133,6 +1141,71 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           </>
         ) : entry ? (
           <>
+            {(() => {
+              const lowerExt = (entry.extension || "").toLowerCase();
+              const isExec =
+                !entry.isDir &&
+                (Boolean(entry.isExecutable) ||
+                  entry.permissions.slice(1).includes("x") ||
+                  lowerExt === "appimage" ||
+                  lowerExt === "desktop" ||
+                  lowerExt === "bin" ||
+                  lowerExt === "run");
+              const isScript =
+                !entry.isDir &&
+                ["sh", "bash", "zsh", "command", "py"].includes(lowerExt);
+              const canRun = isExec || isScript;
+
+              return (
+                <>
+                  {!isMultiSelected && canRun && onRun && (
+                    <button
+                      onClick={() => {
+                        onRun(entry);
+                        onClose();
+                      }}
+                      className={itemCls}
+                    >
+                      <Play className="w-3.5 h-3.5 text-emerald-500 fill-emerald-500/20" />
+                      <span className="font-medium truncate">
+                        {lowerExt === "desktop"
+                          ? "Launch Application"
+                          : isScript
+                          ? "Run as Program"
+                          : "Run"}
+                      </span>
+                    </button>
+                  )}
+                  {!isMultiSelected && canRun && onRunInTerminal && (
+                    <button
+                      onClick={() => {
+                        onRunInTerminal(entry);
+                        onClose();
+                      }}
+                      className={itemCls}
+                    >
+                      <Terminal className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>Run in Terminal</span>
+                    </button>
+                  )}
+                  {!isMultiSelected &&
+                    !entry.isDir &&
+                    onSetExecutable &&
+                    !entry.permissions.slice(1).includes("x") && (
+                      <button
+                        onClick={() => {
+                          void onSetExecutable(entry.path, true);
+                          onClose();
+                        }}
+                        className={itemCls}
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5 text-blue-500" />
+                        <span>Allow Executing as Program</span>
+                      </button>
+                    )}
+                </>
+              );
+            })()}
             <button
               onClick={() => {
                 onOpen(entry);

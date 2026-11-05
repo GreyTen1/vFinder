@@ -566,12 +566,12 @@ fn validate_sudo_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn execute_privileged_task<F, R>(mut task: F, sudo_args: &[&str]) -> Result<R, String>
+fn execute_privileged_task<F>(mut task: F, sudo_args: &[&str]) -> Result<(), String>
 where
-    F: FnMut() -> std::io::Result<R>,
+    F: FnMut() -> std::io::Result<()>,
 {
     match task() {
-        Ok(res) => Ok(res),
+        Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(13) => {
             // Permission denied: try executing targeted sudo command if privileged credentials exist
             #[cfg(unix)]
@@ -584,10 +584,7 @@ where
                     return Err("AUTH_REQUIRED".to_string());
                 };
 
-                run_sudo_command(&pass, sudo_args)?;
-
-                // Re-attempt original task or return Ok
-                task().map_err(|retry_err| format!("{retry_err}"))
+                run_sudo_command(&pass, sudo_args)
             }
             #[cfg(not(unix))]
             Err(format!("{e}"))
@@ -1237,6 +1234,46 @@ pub fn resolve_default_app(path_str: &str, ext: &str, cfg: &OpenWithConfig) -> O
     None
 }
 
+pub fn sanitize_appimage_env(cmd: &mut Command) {
+    if std::env::var_os("APPDIR").is_some() || std::env::var_os("APPIMAGE").is_some() {
+        cmd.env_remove("APPDIR");
+        cmd.env_remove("APPIMAGE");
+        cmd.env_remove("ARGV0");
+        cmd.env_remove("OWD");
+
+        if let Ok(orig_ld) = std::env::var("LD_LIBRARY_PATH_ORIG") {
+            if orig_ld.trim().is_empty() {
+                cmd.env_remove("LD_LIBRARY_PATH");
+            } else {
+                cmd.env("LD_LIBRARY_PATH", orig_ld);
+            }
+            cmd.env_remove("LD_LIBRARY_PATH_ORIG");
+        } else if let Ok(ld) = std::env::var("LD_LIBRARY_PATH") {
+            let appdir = std::env::var("APPDIR").unwrap_or_default();
+            if !appdir.is_empty() {
+                let filtered: Vec<&str> = ld
+                    .split(':')
+                    .filter(|p| !p.starts_with(&appdir) && !p.is_empty())
+                    .collect();
+                if filtered.is_empty() {
+                    cmd.env_remove("LD_LIBRARY_PATH");
+                } else {
+                    cmd.env("LD_LIBRARY_PATH", filtered.join(":"));
+                }
+            }
+        }
+
+        if let Ok(reg) = std::env::var("GST_REGISTRY_1_0") {
+            if reg.contains("vfinder-appimage-gst-registry") {
+                cmd.env_remove("GST_REGISTRY_1_0");
+                cmd.env_remove("GST_REGISTRY");
+            }
+        }
+        cmd.env_remove("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS");
+        cmd.env_remove("WEBKIT_DISABLE_DMABUF_RENDERER");
+    }
+}
+
 pub fn launch_with_program(path: &str, program: &str) -> Result<(), String> {
     use std::process::Stdio;
 
@@ -1272,26 +1309,33 @@ pub fn launch_with_program(path: &str, program: &str) -> Result<(), String> {
         args.push(path.to_string());
     }
 
-    let spawn_result = Command::new(bin)
-        .args(&args)
+    let mut cmd = Command::new(bin);
+    cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    if let Some(parent) = Path::new(path).parent() {
+        cmd.current_dir(parent);
+    }
+    sanitize_appimage_env(&mut cmd);
+    let spawn_result = cmd.spawn();
 
     match spawn_result {
         Ok(_) => Ok(()),
         Err(err) => {
             let lower_bin = bin.to_lowercase();
             if lower_bin != *bin {
-                if Command::new(&lower_bin)
+                let mut lower_cmd = Command::new(&lower_bin);
+                lower_cmd
                     .args(&args)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .is_ok()
-                {
+                    .stderr(Stdio::null());
+                if let Some(parent) = Path::new(path).parent() {
+                    lower_cmd.current_dir(parent);
+                }
+                sanitize_appimage_env(&mut lower_cmd);
+                if lower_cmd.spawn().is_ok() {
                     return Ok(());
                 }
             }
@@ -1330,6 +1374,10 @@ fn describe_kind(is_dir: bool, ext: &str, mime: &str) -> String {
         "js" | "jsx" => "JavaScript Source".to_string(),
         "py" => "Python Script".to_string(),
         "sh" | "bash" | "zsh" => "Shell Script".to_string(),
+        "command" => "Terminal Command Script".to_string(),
+        "appimage" => "AppImage Application".to_string(),
+        "desktop" => "Desktop Application Shortcut".to_string(),
+        "bin" | "run" => "Executable Binary".to_string(),
         "json" => "JSON Document".to_string(),
         "md" | "markdown" => "Markdown Document".to_string(),
         "toml" | "yaml" | "yml" | "ini" | "conf" => "Configuration File".to_string(),
@@ -1503,6 +1551,12 @@ pub fn build_file_entry_with_cfg(
         resolve_default_app(&path_str, &extension, open_cfg)
     };
     let (original_path, deleted_at) = resolve_trash_metadata_for_path(path);
+    let is_executable = !is_dir
+        && ((mode & 0o111 != 0)
+            || extension == "appimage"
+            || extension == "desktop"
+            || extension == "bin"
+            || extension == "run");
 
     Some(FileEntry {
         name,
@@ -1523,6 +1577,7 @@ pub fn build_file_entry_with_cfg(
         default_app,
         original_path,
         deleted_at,
+        is_executable,
     })
 }
 
@@ -1598,6 +1653,12 @@ pub fn build_file_entry_from_dir_entry(
         resolve_default_app(&path_str, &extension, open_cfg)
     };
     let (original_path, deleted_at) = resolve_trash_metadata_for_path(&path);
+    let is_executable = !is_dir
+        && ((mode & 0o111 != 0)
+            || extension == "appimage"
+            || extension == "desktop"
+            || extension == "bin"
+            || extension == "run");
 
     Some(FileEntry {
         name,
@@ -1618,6 +1679,7 @@ pub fn build_file_entry_from_dir_entry(
         default_app,
         original_path,
         deleted_at,
+        is_executable,
     })
 }
 
@@ -2801,6 +2863,222 @@ pub async fn trash_items(paths: Vec<String>) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+fn ensure_file_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let target_buf = if let Ok(target) = fs::canonicalize(path) {
+            target
+        } else {
+            path.to_path_buf()
+        };
+        let target_path = target_buf.as_path();
+
+        if let Ok(metadata) = fs::metadata(target_path) {
+            let current_mode = metadata.permissions().mode();
+            if current_mode & 0o111 != 0o111 {
+                let updated_mode = current_mode | 0o111;
+                let mut perms = metadata.permissions();
+                perms.set_mode(updated_mode);
+                if fs::set_permissions(target_path, perms.clone()).is_err() {
+                    let target_str = target_path.to_string_lossy().to_string();
+                    let _ = execute_privileged_task(
+                        || fs::set_permissions(target_path, perms.clone()),
+                        &["chmod", "+x", &target_str],
+                    );
+                }
+                bump_cache_version();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_appimage_file(path: &Path, ext: &str) -> bool {
+    if ext.eq_ignore_ascii_case("appimage") {
+        return true;
+    }
+    if let Ok(mut f) = fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 12];
+        if let Ok(n) = f.read(&mut buf) {
+            if n >= 11 && &buf[0..4] == b"\x7fELF" {
+                if buf[8] == 0x41 && buf[9] == 0x49 && (buf[10] == 0x01 || buf[10] == 0x02) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_elf_executable_file(path: &Path, ext: &str) -> bool {
+    if ext == "so" || ext.starts_with("so.") || ext == "a" || ext == "o" {
+        return false;
+    }
+    if let Ok(mut f) = fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 4];
+        if let Ok(n) = f.read(&mut buf) {
+            return n == 4 && &buf == b"\x7fELF";
+        }
+    }
+    false
+}
+
+fn launch_desktop_file(path: &Path) -> Result<(), String> {
+    use std::process::Stdio;
+
+    // 1. Try gio launch
+    let mut cmd = Command::new("gio");
+    cmd.arg("launch").arg(path);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    sanitize_appimage_env(&mut cmd);
+    if let Ok(mut child) = cmd.spawn() {
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        if let Ok(Some(status)) = child.try_wait() {
+            if status.success() {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+    }
+
+    // 2. Try gtk-launch
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let mut cmd = Command::new("gtk-launch");
+        cmd.arg(stem);
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        sanitize_appimage_env(&mut cmd);
+        if let Ok(_) = cmd.spawn() {
+            return Ok(());
+        }
+    }
+
+    // 3. Fallback: Parse Exec line
+    if let Ok(content) = fs::read_to_string(path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("Exec=") {
+                let exec_val = &trimmed[5..];
+                let tokens: Vec<&str> = exec_val
+                    .split_whitespace()
+                    .filter(|token| !token.starts_with('%'))
+                    .collect();
+                if let Some(bin) = tokens.first() {
+                    let mut cmd = Command::new(bin);
+                    cmd.args(&tokens[1..]);
+                    if let Some(parent) = path.parent() {
+                        cmd.current_dir(parent);
+                    }
+                    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                    sanitize_appimage_env(&mut cmd);
+                    if cmd.spawn().is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    open::that(path).map_err(|e| format!("Failed to launch desktop entry: {}", e))
+}
+
+fn launch_executable_binary(path: &Path) -> Result<(), String> {
+    use std::process::Stdio;
+
+    let target_buf = if let Ok(target) = fs::canonicalize(path) {
+        target
+    } else {
+        path.to_path_buf()
+    };
+    let target_path = target_buf.as_path();
+
+    ensure_file_executable(target_path)?;
+
+    let mut cmd = Command::new(target_path);
+    if let Some(parent) = path.parent() {
+        cmd.current_dir(parent);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    sanitize_appimage_env(&mut cmd);
+
+    cmd.spawn()
+        .map_err(|e| format!("Failed to launch '{}': {}", path.display(), e))?;
+
+    Ok(())
+}
+
+fn launch_in_terminal(path: &Path) -> Result<(), String> {
+    use std::process::Stdio;
+
+    let target_buf = if let Ok(target) = fs::canonicalize(path) {
+        target
+    } else {
+        path.to_path_buf()
+    };
+    let target_path = target_buf.as_path();
+
+    ensure_file_executable(target_path)?;
+
+    let path_str = target_path.to_string_lossy().to_string();
+    let parent_str = path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
+
+    let script = format!(
+        "cd \"$1\" && \"$2\"; status=$?; echo; echo \"[Process completed with exit code $status]\"; read -n 1 -s -r -p \"Press any key to close...\";"
+    );
+
+    let user_terminal = std::env::var("TERMINAL").ok();
+    let terminal_candidates = [
+        user_terminal.as_deref().unwrap_or(""),
+        "x-terminal-emulator",
+        "konsole",
+        "gnome-terminal",
+        "xfce4-terminal",
+        "kitty",
+        "alacritty",
+        "foot",
+        "wezterm",
+        "terminator",
+        "xterm",
+    ];
+
+    for term in terminal_candidates {
+        if term.is_empty() {
+            continue;
+        }
+        if Command::new("which").arg(term).output().map(|o| o.status.success()).unwrap_or(false) {
+            let mut cmd = Command::new(term);
+            sanitize_appimage_env(&mut cmd);
+            cmd.stdin(Stdio::null());
+
+            match term {
+                "gnome-terminal" => {
+                    cmd.arg("--").arg("sh").arg("-c").arg(&script).arg("_").arg(&parent_str).arg(&path_str);
+                }
+                "kitty" => {
+                    cmd.arg("sh").arg("-c").arg(&script).arg("_").arg(&parent_str).arg(&path_str);
+                }
+                _ => {
+                    cmd.arg("-e").arg("sh").arg("-c").arg(&script).arg("_").arg(&parent_str).arg(&path_str);
+                }
+            }
+
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+    }
+
+    Err("No supported terminal emulator found (tried $TERMINAL, konsole, gnome-terminal, kitty, alacritty, xterm)".to_string())
+}
+
 #[tauri::command]
 pub async fn open_item(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -2813,7 +3091,53 @@ pub async fn open_item(path: String) -> Result<(), String> {
         if let Some(program) = resolve_default_app(&path, &ext, &cfg) {
             return launch_with_program(&path, &program);
         }
+
+        if ext == "desktop" {
+            return launch_desktop_file(p);
+        }
+
+        if is_appimage_file(p, &ext) {
+            return launch_executable_binary(p);
+        }
+
+        if ext == "bin" || ext == "run" || is_elf_executable_file(p, &ext) {
+            return launch_executable_binary(p);
+        }
+
+        if ext == "command" {
+            return launch_in_terminal(p);
+        }
+
         open::that(&path).map_err(|e| format!("Failed to open '{}': {}", path, e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn run_item(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+        let ext = p
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        if ext == "desktop" {
+            return launch_desktop_file(p);
+        }
+
+        launch_executable_binary(p)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn run_item_in_terminal(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+        launch_in_terminal(p)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3366,12 +3690,17 @@ pub async fn get_file_info(path: String) -> Result<FileEntry, String> {
 pub async fn set_file_executable(path: String, executable: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let item_path = Path::new(&path);
-        let metadata = fs::symlink_metadata(item_path)
+        let target_buf = if let Ok(target) = fs::canonicalize(item_path) {
+            target
+        } else {
+            item_path.to_path_buf()
+        };
+        let target_path = target_buf.as_path();
+
+        let metadata = fs::metadata(target_path)
+            .or_else(|_| fs::symlink_metadata(item_path))
             .map_err(|error| format!("Could not read file permissions: {error}"))?;
-        if metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err("Executable permission can only be changed for regular files".to_string());
-        }
-        if !metadata.is_file() {
+        if metadata.is_dir() {
             return Err("Executable permission can only be changed for regular files".to_string());
         }
 
@@ -3384,9 +3713,9 @@ pub async fn set_file_executable(path: String, executable: bool) -> Result<(), S
         let mut permissions = metadata.permissions();
         permissions.set_mode(updated_mode);
         let chmod_arg = if executable { "+x" } else { "-x" };
-        let item_str = item_path.to_string_lossy().to_string();
+        let item_str = target_path.to_string_lossy().to_string();
         execute_privileged_task(
-            || fs::set_permissions(item_path, permissions.clone()),
+            || fs::set_permissions(target_path, permissions.clone()),
             &["chmod", chmod_arg, &item_str],
         )?;
         bump_cache_version();

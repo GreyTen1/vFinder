@@ -11,6 +11,7 @@ interface FileIconProps {
     path?: string;
     size?: number;
     modified?: number;
+    isExecutable?: boolean;
   };
   size?: number;
   className?: string;
@@ -284,7 +285,8 @@ function renderDocumentIcon(
   size: number,
   isSymlink: boolean,
   className: string,
-  containerRef?: React.RefObject<HTMLDivElement>
+  containerRef?: React.RefObject<HTMLDivElement>,
+  isExecutable?: boolean
 ) {
   const isArchive = [
     "zip", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz",
@@ -302,8 +304,21 @@ function renderDocumentIcon(
     badgeColor = "#FF6B35";
   } else if (["ts", "tsx", "js", "jsx", "json"].includes(ext)) {
     badgeColor = "#0A84FF";
-  } else if (["py", "sh", "bash", "zsh"].includes(ext)) {
+  } else if (["py", "sh", "bash", "zsh", "command"].includes(ext)) {
     badgeColor = "#30D158";
+    badgeText = ext === "command" ? "CMD" : ext ? ext.slice(0, 4).toUpperCase() : "SH";
+  } else if (ext === "appimage") {
+    badgeColor = "#5856D6";
+    badgeText = "APP";
+  } else if (ext === "desktop") {
+    badgeColor = "#0A84FF";
+    badgeText = "DESK";
+  } else if (ext === "bin" || ext === "run") {
+    badgeColor = "#5856D6";
+    badgeText = "EXEC";
+  } else if (isExecutable && !ext) {
+    badgeColor = "#5856D6";
+    badgeText = "EXEC";
   } else if (IMAGE_EXTENSIONS.has(ext)) {
     badgeColor = "#BF5AF2";
     badgeText = ext ? ext.toUpperCase() : "IMG";
@@ -565,7 +580,14 @@ const ImageFileIcon: React.FC<{
     );
   }
 
-  return renderDocumentIcon(ext, size, Boolean(entry.isSymlink), className, containerRef);
+  return renderDocumentIcon(
+    ext,
+    size,
+    Boolean(entry.isSymlink),
+    className,
+    containerRef,
+    entry.isExecutable
+  );
 });
 
 export const FileIcon: React.FC<FileIconProps> = React.memo(
@@ -716,6 +738,13 @@ export const FileIcon: React.FC<FileIconProps> = React.memo(
       );
     }
 
-    return renderDocumentIcon(ext, size, Boolean(entry.isSymlink), className);
+    return renderDocumentIcon(
+      ext,
+      size,
+      Boolean(entry.isSymlink),
+      className,
+      undefined,
+      entry.isExecutable
+    );
   }
 );

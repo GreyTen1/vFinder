@@ -202,6 +202,14 @@ export async function apiOpenItem(path: string): Promise<void> {
   return invoke<void>("open_item", { path });
 }
 
+export async function apiRunItem(path: string): Promise<void> {
+  return invoke<void>("run_item", { path });
+}
+
+export async function apiRunItemInTerminal(path: string): Promise<void> {
+  return invoke<void>("run_item_in_terminal", { path });
+}
+
 export async function apiOpenItemWith(
   path: string,
   program: string

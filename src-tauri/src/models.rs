@@ -24,6 +24,8 @@ pub struct FileEntry {
     pub original_path: Option<String>,
     #[serde(default)]
     pub deleted_at: Option<i64>,
+    #[serde(default)]
+    pub is_executable: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

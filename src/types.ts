@@ -17,6 +17,7 @@ export interface FileEntry {
   defaultApp?: string | null;
   originalPath?: string | null;
   deletedAt?: number | null;
+  isExecutable?: boolean;
 }
 
 export interface UserDirectory {

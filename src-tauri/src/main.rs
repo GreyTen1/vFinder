@@ -1065,6 +1065,8 @@ fn main() {
             commands::empty_trash,
             commands::open_item,
             commands::open_item_with,
+            commands::run_item,
+            commands::run_item_in_terminal,
             commands::set_default_app,
             commands::read_file_preview,
             commands::get_file_preview_url,
