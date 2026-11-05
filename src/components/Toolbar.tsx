@@ -90,10 +90,14 @@ interface TabDragState {
 }
 
 function isInsideArchiveWorkspace(path: string, root?: string): boolean {
-  if (!root) return false;
-  const normalizedPath = path.replace(/\\/g, "/").replace(/\/$/, "");
-  const normalizedRoot = root.replace(/\\/g, "/").replace(/\/$/, "");
-  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+  if (root) {
+    const normalizedPath = path.replace(/\\/g, "/").replace(/\/$/, "");
+    const normalizedRoot = root.replace(/\\/g, "/").replace(/\/$/, "");
+    if (normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`)) {
+      return true;
+    }
+  }
+  return /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2?|tar\.xz|txz|tar\.zst|tzst|tar\.lzma)($|\/)/i.test(path);
 }
 
 const ArchiveZipperMark: React.FC<{ className?: string }> = ({ className }) => (

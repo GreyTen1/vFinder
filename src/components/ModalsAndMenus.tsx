@@ -728,6 +728,7 @@ export interface ContextMenuState {
   y: number;
   entry?: FileEntry;
   targetDir?: string;
+  inSplitPane?: boolean;
   favorite?: {
     name: string;
     path: string;
@@ -772,6 +773,8 @@ interface ContextMenuProps {
   onFirstAidVolume?: (vol: VolumeInfo) => void;
   onToast?: (message: string) => void;
   isTrashView?: boolean;
+  isArchiveWorkspace?: boolean;
+  onExtractSelected?: (entries?: FileEntry[]) => void;
   onRestoreTrash?: (entry?: FileEntry) => void;
   onRestoreAllTrash?: () => void;
   onDeletePermanently?: (entry?: FileEntry) => void;
@@ -820,6 +823,8 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onFirstAidVolume,
   onToast,
   isTrashView = false,
+  isArchiveWorkspace = false,
+  onExtractSelected,
   onRestoreTrash,
   onRestoreAllTrash,
   onDeletePermanently,
@@ -1141,6 +1146,94 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               <span className="ml-auto opacity-60 text-[10px]">Del</span>
             </button>
           </>
+        ) : entry && isArchiveWorkspace ? (
+          <>
+            <button
+              onClick={() => {
+                onOpen(entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+              <span className="font-medium truncate">
+                {!isMultiSelected && entry.defaultApp
+                  ? `Open with “${entry.defaultApp}”`
+                  : `Open${countSuffix}`}
+              </span>
+            </button>
+            {!entry.isDir && !isMultiSelected && onOpenWith && (
+              <button
+                onClick={() => {
+                  onOpenWith(entry);
+                  onClose();
+                }}
+                className={itemCls}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                <span>Open With…</span>
+              </button>
+            )}
+            <button
+              onClick={() => {
+                onQuickLook(entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span>Quick Look</span>
+              <span className="ml-auto opacity-60 text-[10px]">Space</span>
+            </button>
+            <button
+              onClick={() => {
+                onGetInfo(entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Info className="w-3.5 h-3.5" />
+              <span>Get Info</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+I</span>
+            </button>
+            <div className="my-1 border-t border-current/10" />
+            <button
+              onClick={() => {
+                if (onExtractSelected) {
+                  onExtractSelected(isMultiSelected ? undefined : [entry]);
+                } else if (onExtractArchive) {
+                  onExtractArchive(entry);
+                }
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-[#0a84ff]" />
+              <span>Extract{countSuffix}…</span>
+            </button>
+            <button
+              onClick={() => {
+                onCopy(isMultiSelected ? undefined : entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copy{countSuffix}</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+C</span>
+            </button>
+            <button
+              onClick={() => {
+                onCut(isMultiSelected ? undefined : entry);
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Scissors className="w-3.5 h-3.5" />
+              <span>Cut{countSuffix}</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+X</span>
+            </button>
+          </>
         ) : entry ? (
           <>
             {(() => {
@@ -1416,6 +1509,34 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Empty Trash…</span>
+            </button>
+          </>
+        ) : isArchiveWorkspace ? (
+          <>
+            <button
+              onClick={() => {
+                if (onExtractArchive && entry) {
+                  onExtractArchive(entry);
+                } else if (onExtractSelected) {
+                  onExtractSelected();
+                }
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-[#0a84ff]" />
+              <span>Extract Entire Archive…</span>
+            </button>
+            <button
+              onClick={() => {
+                onGetInfo();
+                onClose();
+              }}
+              className={itemCls}
+            >
+              <Info className="w-3.5 h-3.5" />
+              <span>Get Info</span>
+              <span className="ml-auto opacity-60 text-[10px]">Ctrl+I</span>
             </button>
           </>
         ) : (

@@ -20,6 +20,7 @@ interface SplitExplorerPaneProps {
   refreshVersion: number;
   panelWidthPercent: number;
   dropTargetPath: string | null;
+  onActivePane?: () => void;
   onStartItemDrag: (
     event: React.MouseEvent,
     entry: FileEntry,
@@ -50,6 +51,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   refreshVersion,
   panelWidthPercent,
   dropTargetPath,
+  onActivePane,
   onStartItemDrag,
   onClose,
   onLocationChange,
@@ -300,6 +302,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
       data-split-pane="true"
       data-drop-path={location.activeTag ? undefined : location.path}
       data-drop-name={location.title}
+      onPointerDownCapture={onActivePane}
       onMouseEnter={() => onHoverChange(true)}
       onMouseLeave={() => onHoverChange(false)}
       className={`flex min-w-0 flex-1 flex-col border-l ${

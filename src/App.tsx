@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { Archive, Loader2, Trash2, RotateCcw, AlertTriangle } from "lucide-react";
+import { Archive, FolderDown, Loader2, Trash2, RotateCcw, AlertTriangle } from "lucide-react";
 import {
   ClipboardState,
   FileEntry,
@@ -39,6 +39,7 @@ import {
   apiFileManagerFrontendReady,
   apiTakeFileManagerRequests,
   apiExtractArchive,
+  apiExtractArchiveItems,
   apiMountPartition,
   apiMoveItems,
   apiOpenItem,
@@ -133,6 +134,14 @@ function getParentPath(path: string): string {
   const idx = path.lastIndexOf("/");
   if (idx <= 0) return "/";
   return path.slice(0, idx);
+}
+
+export function findArchiveRootFromPath(path: string): string | undefined {
+  const normalized = path.replace(/\\/g, "/");
+  const match = normalized.match(
+    /^(.+?\.(?:zip|tar|tar\.gz|tgz|tar\.bz2|tbz2?|tar\.xz|txz|tar\.zst|tzst|tar\.lzma))(?:\/.*)?$/i
+  );
+  return match ? match[1] : undefined;
 }
 
 interface ActiveDragState {
@@ -545,7 +554,10 @@ export const App: React.FC = () => {
   const [firstAidVolume, setFirstAidVolume] = useState<VolumeInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [activeOperations, setActiveOperations] = useState<Array<{ id: number; label: string }>>([]);
-  const [openingArchive, setOpeningArchive] = useState<string | null>(null);
+  const [openingArchive, setOpeningArchive] = useState<{
+    name: string;
+    path: string;
+  } | null>(null);
   const operationIdRef = useRef(0);
   const [columnActivePath, setColumnActivePath] = useState<string | null>(null);
   const columnActivePathRef = useRef<string | null>(null);
@@ -636,6 +648,19 @@ export const App: React.FC = () => {
   );
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+
+  const archiveRoot = useMemo(() => {
+    return (
+      activeTab?.archiveWorkspaceRoot?.replace(/\\/g, "/").replace(/\/$/, "") ||
+      findArchiveRootFromPath(activeTab?.path || "")?.replace(/\\/g, "/").replace(/\/$/, "")
+    );
+  }, [activeTab?.archiveWorkspaceRoot, activeTab?.path]);
+
+  const activePath = activeTab?.path.replace(/\\/g, "/").replace(/\/$/, "") || "";
+  const isArchiveWorkspace = Boolean(
+    archiveRoot &&
+      (activePath === archiveRoot || activePath.startsWith(`${archiveRoot}/`))
+  );
   const [pendingFileManagerReveal, setPendingFileManagerReveal] = useState<{
     directory: string;
     selectedPaths: string[];
@@ -738,6 +763,11 @@ export const App: React.FC = () => {
       const cached = dirCacheRef.current.get(cacheKey);
       if (cached) {
         setEntries((prev) => (areEntriesEqual(prev, cached) ? prev : cached));
+        setEntriesReady(true);
+        setEntriesLoadedPath(targetPath);
+      } else {
+        setEntries([]);
+        setEntriesReady(false);
       }
     },
     [showHidden]
@@ -904,9 +934,11 @@ export const App: React.FC = () => {
   const loadCurrentEntries = useCallback(
     async (invalidateCache = false) => {
       if (!activeTab) return;
+      const targetPath = activeTab.path;
+      const targetTag = activeTab.activeTag;
       const reqId = ++requestIdRef.current;
       const effectiveSearch = debouncedSearchQuery.trim();
-      const cacheKey = `${activeTab.activeTag || activeTab.path}::${showHidden}::${effectiveSearch}`;
+      const cacheKey = `${targetTag || targetPath}::${showHidden}::${effectiveSearch}`;
 
       if (invalidateCache) {
         dirCacheRef.current.clear();
@@ -918,40 +950,64 @@ export const App: React.FC = () => {
         }
       }
 
+      const isArchive = Boolean(findArchiveRootFromPath(targetPath));
+      const cached = dirCacheRef.current.get(cacheKey);
+      if (isArchive && !cached) {
+        const archName = targetPath.split(/[\\/]/).pop() || targetPath;
+        setOpeningArchive((cur) =>
+          cur?.path === targetPath ? cur : { name: archName, path: targetPath }
+        );
+      }
+
       try {
         let list: FileEntry[];
-        if (activeTab.activeTag) {
-          list = await apiGetFilesByTag(activeTab.activeTag);
+        if (targetTag) {
+          list = await apiGetFilesByTag(targetTag);
         } else if (
           effectiveSearch.length > 0 &&
-          activeTab.path !== "__RECENTS__" &&
-          activeTab.path !== "__TRASH__"
+          targetPath !== "__RECENTS__" &&
+          targetPath !== "__TRASH__"
         ) {
           list = await apiSearchDirectory(
-            activeTab.path,
+            targetPath,
             effectiveSearch,
             showHidden
           );
         } else {
-          list = await apiReadDirectory(activeTab.path, showHidden);
+          list = await apiReadDirectory(targetPath, showHidden);
           if (effectiveSearch.length > 0) {
             const q = effectiveSearch.toLowerCase();
             list = list.filter((e) => e.name.toLowerCase().includes(q));
           }
         }
 
-        if (reqId !== requestIdRef.current) return;
+        if (
+          reqId !== requestIdRef.current ||
+          activeTabRef.current?.path !== targetPath ||
+          (activeTabRef.current?.activeTag || null) !== (targetTag || null)
+        ) {
+          return;
+        }
         dirCacheRef.current.set(cacheKey, list);
         setEntries((prev) => (areEntriesEqual(prev, list) ? prev : list));
       } catch (err) {
-        if (reqId === requestIdRef.current) {
+        if (
+          reqId === requestIdRef.current &&
+          activeTabRef.current?.path === targetPath &&
+          (activeTabRef.current?.activeTag || null) === (targetTag || null)
+        ) {
           showToast(`${err}`);
         }
       } finally {
-        if (reqId === requestIdRef.current) {
+        if (
+          reqId === requestIdRef.current &&
+          activeTabRef.current?.path === targetPath &&
+          (activeTabRef.current?.activeTag || null) === (targetTag || null)
+        ) {
           setEntriesReady(true);
-          setEntriesLoadedPath(activeTab.path);
+          setEntriesLoadedPath(targetPath);
         }
+        setOpeningArchive((cur) => (cur?.path === targetPath ? null : cur));
       }
     },
     [activeTab?.path, activeTab?.activeTag, debouncedSearchQuery, showHidden, showToast]
@@ -1126,6 +1182,8 @@ export const App: React.FC = () => {
   // Navigation handlers (synchronously swap cached entries in the same state batch!)
   const navigateTo = useCallback(
     (path: string, customTitle?: string) => {
+      requestIdRef.current++;
+      setOpeningArchive((cur) => (cur?.path === path ? cur : null));
       setSearchQuery("");
       setDebouncedSearchQuery("");
       setSelectedPaths([]);
@@ -1135,16 +1193,24 @@ export const App: React.FC = () => {
       applyFavoriteViewModeIfPinned(path);
       applyCachedEntriesIfAvailable(path, null);
       const title = customTitle || folderDisplayName(path, mainPartitionName);
+      const detectedRoot = findArchiveRootFromPath(path);
 
       setTabs((prev) =>
         prev.map((t) => {
           if (t.id !== activeTabId) return t;
           const nextHistory = t.history.slice(0, t.historyIndex + 1);
           nextHistory.push(path);
+          const archRoot = detectedRoot || t.archiveWorkspaceRoot;
+          const normPath = path.replace(/\\/g, "/").replace(/\/$/, "");
+          const normArch = archRoot?.replace(/\\/g, "/").replace(/\/$/, "");
+          const inArch = Boolean(
+            normArch && (normPath === normArch || normPath.startsWith(`${normArch}/`))
+          );
           return {
             ...t,
             title,
             path,
+            archiveWorkspaceRoot: inArch ? archRoot : undefined,
             history: nextHistory,
             historyIndex: nextHistory.length - 1,
             activeTag: null,
@@ -1256,6 +1322,8 @@ export const App: React.FC = () => {
 
   const selectTagFilter = useCallback(
     (tagColor: string) => {
+      requestIdRef.current++;
+      setOpeningArchive(null);
       setSearchQuery("");
       setSelectedPaths([]);
       lastSelectedPathRef.current = null;
@@ -1276,6 +1344,8 @@ export const App: React.FC = () => {
   );
 
   const goBack = useCallback(() => {
+    requestIdRef.current++;
+    setOpeningArchive(null);
     setTabs((prev) =>
       prev.map((t) => {
         if (t.id !== activeTabId || t.historyIndex <= 0) return t;
@@ -1283,10 +1353,18 @@ export const App: React.FC = () => {
         const newPath = t.history[newIdx];
         applyFavoriteViewModeIfPinned(newPath);
         applyCachedEntriesIfAvailable(newPath, null);
+        const detectedRoot = findArchiveRootFromPath(newPath);
+        const archRoot = detectedRoot || t.archiveWorkspaceRoot;
+        const normPath = newPath.replace(/\\/g, "/").replace(/\/$/, "");
+        const normArch = archRoot?.replace(/\\/g, "/").replace(/\/$/, "");
+        const inArch = Boolean(
+          normArch && (normPath === normArch || normPath.startsWith(`${normArch}/`))
+        );
         return {
           ...t,
           path: newPath,
           title: folderDisplayName(newPath, mainPartitionName),
+          archiveWorkspaceRoot: inArch ? archRoot : undefined,
           historyIndex: newIdx,
           activeTag: null,
         };
@@ -1300,6 +1378,8 @@ export const App: React.FC = () => {
   ]);
 
   const goForward = useCallback(() => {
+    requestIdRef.current++;
+    setOpeningArchive(null);
     setTabs((prev) =>
       prev.map((t) => {
         if (t.id !== activeTabId || t.historyIndex >= t.history.length - 1)
@@ -1308,10 +1388,18 @@ export const App: React.FC = () => {
         const newPath = t.history[newIdx];
         applyFavoriteViewModeIfPinned(newPath);
         applyCachedEntriesIfAvailable(newPath, null);
+        const detectedRoot = findArchiveRootFromPath(newPath);
+        const archRoot = detectedRoot || t.archiveWorkspaceRoot;
+        const normPath = newPath.replace(/\\/g, "/").replace(/\/$/, "");
+        const normArch = archRoot?.replace(/\\/g, "/").replace(/\/$/, "");
+        const inArch = Boolean(
+          normArch && (normPath === normArch || normPath.startsWith(`${normArch}/`))
+        );
         return {
           ...t,
           path: newPath,
           title: folderDisplayName(newPath, mainPartitionName),
+          archiveWorkspaceRoot: inArch ? archRoot : undefined,
           historyIndex: newIdx,
           activeTag: null,
         };
@@ -1342,6 +1430,8 @@ export const App: React.FC = () => {
   // Tab handlers
   const handleSelectTab = useCallback(
     (id: string) => {
+      requestIdRef.current++;
+      setOpeningArchive(null);
       setActiveTabId(id);
       const targetTab = tabs.find((t) => t.id === id);
       if (targetTab) {
@@ -1359,6 +1449,8 @@ export const App: React.FC = () => {
       if (tabs.length < 2) return;
       const primaryTab = tabs.find((candidate) => candidate.id !== tab.id);
       if (!primaryTab) return;
+      requestIdRef.current++;
+      setOpeningArchive(null);
       setActiveTabId(primaryTab.id);
       setSelectedPaths([]);
       setSearchQuery("");
@@ -1429,6 +1521,8 @@ export const App: React.FC = () => {
 
   const handleNewTab = useCallback(
     (initialPath?: string, initialTitle?: string) => {
+      requestIdRef.current++;
+      setOpeningArchive(null);
       const validPath =
         typeof initialPath === "string" && initialPath.length > 0
           ? initialPath
@@ -1456,6 +1550,7 @@ export const App: React.FC = () => {
           id,
           title,
           path: targetPath,
+          archiveWorkspaceRoot: findArchiveRootFromPath(targetPath),
           history: [targetPath],
           historyIndex: 0,
           activeTag: null,
@@ -1473,6 +1568,8 @@ export const App: React.FC = () => {
 
   const handleCloseTab = useCallback(
     (id: string, allowLastTab = false) => {
+      requestIdRef.current++;
+      setOpeningArchive(null);
       if (allowLastTab) {
         setSearchQuery("");
         setDebouncedSearchQuery("");
@@ -1590,32 +1687,21 @@ export const App: React.FC = () => {
   );
 
   const handleBrowseArchive = useCallback(
-    async (path: string) => {
+    (path: string) => {
       const archiveName = path.split(/[\\/]/).pop() || path;
-      setOpeningArchive(archiveName);
-      try {
-        const destination = await runWithActivity(
-          `Opening ${archiveName}...`,
-          () => apiExtractArchive(path)
-        );
-        await loadCurrentEntries(true);
-        setSplitPaneRefreshVersion((version) => version + 1);
-        navigateTo(destination, archiveName);
-        setTabs((tabs) =>
-          tabs.map((tab) =>
-            tab.id === activeTabId
-              ? { ...tab, archiveWorkspaceRoot: destination }
-              : tab
-          )
-        );
-        showToast(`Opened extracted copy of ${archiveName}`);
-      } catch (error) {
-        showToast(`Could not open archive: ${error}`);
-      } finally {
-        setOpeningArchive(null);
+      const cacheKey = `${path}::${showHidden}::`;
+      const isCached = dirCacheRef.current.has(cacheKey);
+      if (!isCached) {
+        setOpeningArchive({ name: archiveName, path });
       }
+      if (activeTabRef.current?.path === path) {
+        void loadCurrentEntries(true);
+      } else {
+        navigateTo(path, archiveName);
+      }
+      showToast(`Browsing ${archiveName}`);
     },
-    [activeTabId, loadCurrentEntries, navigateTo, runWithActivity, showToast]
+    [loadCurrentEntries, navigateTo, showHidden, showToast]
   );
 
   const handleOpenEntry = useCallback(
@@ -1683,6 +1769,10 @@ export const App: React.FC = () => {
         (viewMode === "columns" && columnActivePathRef.current
           ? columnActivePathRef.current
           : activeTab?.path);
+      if (isArchiveWorkspace || (targetDir && findArchiveRootFromPath(targetDir))) {
+        showToast("Cannot create folders: archives are read-only");
+        return;
+      }
       if (!targetDir || targetDir === "__RECENTS__" || targetDir === "__TRASH__" || activeTab?.activeTag) {
         showToast("Navigate to a folder first to create a new folder");
         return;
@@ -1738,6 +1828,10 @@ export const App: React.FC = () => {
         (viewMode === "columns" && columnActivePathRef.current
           ? columnActivePathRef.current
           : activeTab?.path);
+      if (isArchiveWorkspace || (targetDir && findArchiveRootFromPath(targetDir))) {
+        showToast("Cannot create files: archives are read-only");
+        return;
+      }
       if (!targetDir || targetDir === "__RECENTS__" || targetDir === "__TRASH__" || activeTab?.activeTag) {
         showToast("Navigate to a folder first to create a file");
         return;
@@ -1784,12 +1878,19 @@ export const App: React.FC = () => {
     ]
   );
 
-  const startRename = useCallback((entry: FileEntry) => {
-    knownEntriesMapRef.current.set(entry.path, entry);
-    renameCommitPathRef.current = null;
-    setRenamingPath(entry.path);
-    setRenameValue(entry.name);
-  }, []);
+  const startRename = useCallback(
+    (entry: FileEntry) => {
+      if (isArchiveWorkspace || findArchiveRootFromPath(entry.path)) {
+        showToast("Cannot rename items: archives are read-only");
+        return;
+      }
+      knownEntriesMapRef.current.set(entry.path, entry);
+      renameCommitPathRef.current = null;
+      setRenamingPath(entry.path);
+      setRenameValue(entry.name);
+    },
+    [isArchiveWorkspace, showToast]
+  );
 
   const submitRename = useCallback(async () => {
     if (!renamingPath) return;
@@ -1831,9 +1932,90 @@ export const App: React.FC = () => {
       document.removeEventListener("pointerdown", commitOnOutsidePointerDown, true);
   }, [renamingPath, submitRename]);
 
+  const getActiveTargets = useCallback(
+    (targetEntry?: FileEntry) => {
+      if (targetEntry) {
+        const isTargetInSplit = Boolean(
+          splitPane &&
+            (activePaneRef.current === "split" ||
+              splitPaneHoveredRef.current ||
+              splitPaneSelectedPathsRef.current.includes(targetEntry.path) ||
+              (splitPane.path &&
+                (targetEntry.path === splitPane.path ||
+                  targetEntry.path.startsWith(
+                    splitPane.path.endsWith("/")
+                      ? splitPane.path
+                      : `${splitPane.path}/`
+                  ))))
+        );
+        const isArchive = isTargetInSplit
+          ? Boolean(
+              splitPane?.archiveWorkspaceRoot ||
+                (splitPane?.path && findArchiveRootFromPath(splitPane.path)) ||
+                findArchiveRootFromPath(targetEntry.path)
+            )
+          : Boolean(
+              isArchiveWorkspace ||
+                (activeTab?.path && findArchiveRootFromPath(activeTab.path)) ||
+                findArchiveRootFromPath(targetEntry.path)
+            );
+        return {
+          isSplit: isTargetInSplit,
+          targets: [targetEntry.path],
+          isArchive,
+          currentPath: isTargetInSplit ? splitPane?.path : activeTab?.path,
+        };
+      }
+
+      const hasSplitSelection =
+        Boolean(splitPane) && splitPaneSelectedPathsRef.current.length > 0;
+      const hasPrimarySelection = selectedPaths.length > 0;
+
+      let isSplit = false;
+      if (hasSplitSelection && !hasPrimarySelection) {
+        isSplit = true;
+      } else if (hasSplitSelection && hasPrimarySelection) {
+        isSplit =
+          splitPaneHoveredRef.current || activePaneRef.current === "split";
+      } else {
+        isSplit = false;
+      }
+
+      if (isSplit && splitPane) {
+        const isArchive = Boolean(
+          splitPane.archiveWorkspaceRoot ||
+            (splitPane.path && findArchiveRootFromPath(splitPane.path)) ||
+            splitPaneSelectedPathsRef.current.some((p) =>
+              findArchiveRootFromPath(p)
+            )
+        );
+        return {
+          isSplit: true,
+          targets: splitPaneSelectedPathsRef.current,
+          isArchive,
+          currentPath: splitPane.path,
+        };
+      }
+
+      const isArchive = Boolean(
+        isArchiveWorkspace ||
+          (activeTab?.path && findArchiveRootFromPath(activeTab.path)) ||
+          selectedPaths.some((p) => findArchiveRootFromPath(p))
+      );
+      return {
+        isSplit: false,
+        targets: selectedPaths,
+        isArchive,
+        currentPath: activeTab?.path,
+      };
+    },
+    [activeTab?.path, isArchiveWorkspace, selectedPaths, splitPane]
+  );
+
   const handleDuplicate = useCallback(
     async (entry?: FileEntry) => {
-      const targets = entry ? [entry.path] : selectedPaths;
+      const active = getActiveTargets(entry);
+      const targets = active.targets;
       if (targets.length === 0) return;
       try {
         const createdPaths = await runWithActivity(
@@ -1847,9 +2029,14 @@ export const App: React.FC = () => {
             return created;
           }
         );
-        await loadCurrentEntries(true);
         playSound("move-copy");
-        setSelectedPaths(createdPaths);
+        if (active.isSplit) {
+          splitPaneSelectedPathsRef.current = createdPaths;
+          setSplitPaneRefreshVersion((v) => v + 1);
+        } else {
+          await loadCurrentEntries(true);
+          setSelectedPaths(createdPaths);
+        }
         showToast(
           targets.length === 1
             ? `Duplicated item`
@@ -1859,26 +2046,32 @@ export const App: React.FC = () => {
         showToast(`${err}`);
       }
     },
-    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
+    [getActiveTargets, loadCurrentEntries, runWithActivity, showToast]
   );
 
   const handleCompress = useCallback(
     async (entry?: FileEntry) => {
-      const targets = entry ? [entry.path] : selectedPaths;
+      const active = getActiveTargets(entry);
+      const targets = active.targets;
       if (targets.length === 0) return;
       try {
         const archivePath = await runWithActivity(
           `Compressing ${targets.length} item(s)...`,
           () => apiCompressItems(targets)
         );
-        await loadCurrentEntries(true);
-        setSelectedPaths([archivePath]);
+        if (active.isSplit) {
+          splitPaneSelectedPathsRef.current = [archivePath];
+          setSplitPaneRefreshVersion((v) => v + 1);
+        } else {
+          await loadCurrentEntries(true);
+          setSelectedPaths([archivePath]);
+        }
         showToast(`Created ${archivePath.split(/[\\/]/).pop() || "ZIP archive"}`);
       } catch (error) {
         showToast(`Compression failed: ${error}`);
       }
     },
-    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
+    [getActiveTargets, loadCurrentEntries, runWithActivity, showToast]
   );
 
   const handleExtractArchive = useCallback(
@@ -1900,35 +2093,94 @@ export const App: React.FC = () => {
     [loadCurrentEntries, runWithActivity, showToast]
   );
 
+  const handleExtractSelectedItems = useCallback(
+    async (entriesToExtract?: FileEntry[]) => {
+      const currentArchive = archiveRoot;
+      if (!currentArchive) return;
+      const items =
+        entriesToExtract && entriesToExtract.length > 0
+          ? entriesToExtract
+          : selectedPaths
+              .map(
+                (p) =>
+                  knownEntriesMapRef.current.get(p) ||
+                  sortedEntries.find((e) => e.path === p)
+              )
+              .filter((e): e is FileEntry => Boolean(e));
+      if (items.length === 0) {
+        void handleExtractArchive(currentArchive);
+        return;
+      }
+      try {
+        const rootNorm = currentArchive.replace(/\\/g, "/").replace(/\/$/, "");
+        const itemRelativePaths = items.map((item) => {
+          const itemNorm = item.path.replace(/\\/g, "/");
+          return itemNorm.startsWith(`${rootNorm}/`)
+            ? itemNorm.slice(rootNorm.length + 1)
+            : item.name;
+        });
+        const dest = await runWithActivity(
+          `Extracting ${itemRelativePaths.length} item(s)...`,
+          () => apiExtractArchiveItems(currentArchive, itemRelativePaths)
+        );
+        showToast(`Extracted to ${dest.split(/[\\/]/).pop() || dest}`);
+      } catch (err) {
+        showToast(`Extraction failed: ${err}`);
+      }
+    },
+    [archiveRoot, handleExtractArchive, selectedPaths, sortedEntries, runWithActivity, showToast]
+  );
+
   const handleTrash = useCallback(
     async (targetEntry?: FileEntry) => {
-      const targets = targetEntry ? [targetEntry.path] : selectedPaths;
+      const active = getActiveTargets(targetEntry);
+      const targets = active.targets;
       if (targets.length === 0) return;
+      if (active.isArchive || (targets[0] && findArchiveRootFromPath(targets[0]))) {
+        showToast("Cannot delete items: archives are read-only");
+        return;
+      }
       try {
         await runWithActivity(`Moving ${targets.length} item(s) to Trash...`, () =>
           apiTrashItems(targets)
         );
         playSound("file-trash");
-        setSelectedPaths([]);
-        await loadCurrentEntries(true);
+        if (active.isSplit) {
+          splitPaneSelectedPathsRef.current = [];
+          setSplitPanePrimaryEntry(null);
+          setSplitPaneRefreshVersion((version) => version + 1);
+          void loadCurrentEntries(true);
+        } else {
+          setSelectedPaths([]);
+          await loadCurrentEntries(true);
+          if (splitPane) {
+            setSplitPaneRefreshVersion((version) => version + 1);
+          }
+        }
         showToast(`Moved ${targets.length} item(s) to Trash`);
       } catch (err) {
         showToast(`${err}`);
       }
     },
-    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
+    [getActiveTargets, loadCurrentEntries, runWithActivity, showToast, splitPane]
   );
 
   const handleRestoreTrash = useCallback(
     async (targetEntry?: FileEntry) => {
-      const targets = targetEntry ? [targetEntry.path] : selectedPaths;
+      const active = getActiveTargets(targetEntry);
+      const targets = active.targets;
       if (targets.length === 0) return;
       try {
         const restored = await runWithActivity(
           `Restoring ${targets.length} item(s)...`,
           () => apiRestoreTrashItems(targets)
         );
-        setSelectedPaths([]);
+        if (active.isSplit) {
+          splitPaneSelectedPathsRef.current = [];
+          setSplitPanePrimaryEntry(null);
+        } else {
+          setSelectedPaths([]);
+        }
         await loadCurrentEntries(true);
         setSplitPaneRefreshVersion((version) => version + 1);
         showToast(
@@ -1940,7 +2192,7 @@ export const App: React.FC = () => {
         showToast(`${err}`);
       }
     },
-    [selectedPaths, loadCurrentEntries, runWithActivity, showToast]
+    [getActiveTargets, loadCurrentEntries, runWithActivity, showToast]
   );
 
   const handleRestoreAllTrash = useCallback(async () => {
@@ -1958,6 +2210,8 @@ export const App: React.FC = () => {
         () => apiRestoreTrashItems(allTrashPaths)
       );
       setSelectedPaths([]);
+      splitPaneSelectedPathsRef.current = [];
+      setSplitPanePrimaryEntry(null);
       await loadCurrentEntries(true);
       setSplitPaneRefreshVersion((version) => version + 1);
       showToast(`Restored ${restored.length} item(s) from Trash`);
@@ -1968,15 +2222,20 @@ export const App: React.FC = () => {
 
   const handleDeletePermanently = useCallback(
     (targetEntry?: FileEntry) => {
-      const targets = targetEntry ? [targetEntry.path] : selectedPaths;
+      const active = getActiveTargets(targetEntry);
+      const targets = active.targets;
       if (targets.length === 0) return;
+      if (active.isArchive || (targets[0] && findArchiveRootFromPath(targets[0]))) {
+        showToast("Cannot delete items: archives are read-only");
+        return;
+      }
       setTrashConfirmModal({
         mode: "delete-selected",
         paths: targets,
         count: targets.length,
       });
     },
-    [selectedPaths]
+    [getActiveTargets, showToast]
   );
 
   const handleEmptyTrash = useCallback(async () => {
@@ -2003,6 +2262,8 @@ export const App: React.FC = () => {
         await runWithActivity("Emptying Trash...", () => apiEmptyTrash());
         playSound("empty-trash");
         setSelectedPaths([]);
+        splitPaneSelectedPathsRef.current = [];
+        setSplitPanePrimaryEntry(null);
         await loadCurrentEntries(true);
         setSplitPaneRefreshVersion((version) => version + 1);
         showToast("Emptied Trash");
@@ -2013,6 +2274,8 @@ export const App: React.FC = () => {
         );
         playSound("empty-trash");
         setSelectedPaths([]);
+        splitPaneSelectedPathsRef.current = [];
+        setSplitPanePrimaryEntry(null);
         await loadCurrentEntries(true);
         setSplitPaneRefreshVersion((version) => version + 1);
         showToast(`Permanently deleted ${modal.paths.length} item(s)`);
@@ -2024,30 +2287,29 @@ export const App: React.FC = () => {
 
   const handleCopy = useCallback(
     (entry?: FileEntry) => {
-      const paths = entry
-        ? [entry.path]
-        : splitPaneHoveredRef.current
-        ? splitPaneSelectedPathsRef.current
-        : selectedPaths;
+      const active = getActiveTargets(entry);
+      const paths = active.targets;
       if (paths.length === 0) return;
       setClipboard({ paths, mode: "copy" });
       showToast(`Copied ${paths.length} item(s)`);
     },
-    [selectedPaths, showToast]
+    [getActiveTargets, showToast]
   );
 
   const handleCut = useCallback(
     (entry?: FileEntry) => {
-      const paths = entry
-        ? [entry.path]
-        : splitPaneHoveredRef.current
-        ? splitPaneSelectedPathsRef.current
-        : selectedPaths;
+      const active = getActiveTargets(entry);
+      const paths = active.targets;
       if (paths.length === 0) return;
-      setClipboard({ paths, mode: "cut" });
-      showToast(`Cut ${paths.length} item(s)`);
+      if (active.isArchive || paths.some((p) => findArchiveRootFromPath(p))) {
+        setClipboard({ paths, mode: "copy" });
+        showToast(`Copied ${paths.length} item(s)`);
+      } else {
+        setClipboard({ paths, mode: "cut" });
+        showToast(`Cut ${paths.length} item(s)`);
+      }
     },
-    [selectedPaths, showToast]
+    [getActiveTargets, showToast]
   );
 
   const handlePaste = useCallback(
@@ -2055,22 +2317,34 @@ export const App: React.FC = () => {
       const destDir =
         targetDirOverride ||
         contextMenu?.targetDir ||
-        (viewMode === "columns" && columnActivePathRef.current
+        (splitPane && (splitPaneHoveredRef.current || activePaneRef.current === "split")
+          ? splitPane.path
+          : viewMode === "columns" && columnActivePathRef.current
           ? columnActivePathRef.current
           : activeTab?.path);
+      if (isArchiveWorkspace || (destDir && findArchiveRootFromPath(destDir))) {
+        showToast("Cannot paste items into an archive: archives are read-only");
+        return;
+      }
       if (!clipboard || !destDir || destDir === "__RECENTS__" || destDir === "__TRASH__") return;
       try {
-        if (clipboard.mode === "copy") {
+        const isArchiveSource = clipboard.paths.some((p) => findArchiveRootFromPath(p));
+        if (clipboard.mode === "copy" || isArchiveSource) {
           const created = await runWithActivity(
             `Copying ${clipboard.paths.length} item(s)...`,
             async () => {
               const result = await apiCopyItems(clipboard.paths, destDir);
               await loadCurrentEntries(true);
+              setSplitPaneRefreshVersion((version) => version + 1);
               return result;
             }
           );
           playSound("move-copy");
-          setSelectedPaths(created);
+          if (splitPane && (splitPaneHoveredRef.current || activePaneRef.current === "split")) {
+            splitPaneSelectedPathsRef.current = created;
+          } else {
+            setSelectedPaths(created);
+          }
           setClipboard((current) => (current === clipboard ? null : current));
           showToast(`Pasted ${created.length} item(s)`);
         } else {
@@ -2079,12 +2353,17 @@ export const App: React.FC = () => {
             async () => {
               const result = await apiMoveItems(clipboard.paths, destDir);
               await loadCurrentEntries(true);
+              setSplitPaneRefreshVersion((version) => version + 1);
               return result;
             }
           );
           playSound("move-copy");
           recordMoveUndo(clipboard.paths, moved);
-          setSelectedPaths(moved);
+          if (splitPane && (splitPaneHoveredRef.current || activePaneRef.current === "split")) {
+            splitPaneSelectedPathsRef.current = moved;
+          } else {
+            setSelectedPaths(moved);
+          }
           setClipboard((current) => (current === clipboard ? null : current));
           showToast(`Moved ${moved.length} item(s)`);
         }
@@ -2092,7 +2371,7 @@ export const App: React.FC = () => {
         showToast(`${err}`);
       }
     },
-    [clipboard, contextMenu?.targetDir, viewMode, activeTab?.path, loadCurrentEntries, recordMoveUndo, runWithActivity, showToast]
+    [clipboard, contextMenu?.targetDir, splitPane, viewMode, activeTab?.path, isArchiveWorkspace, loadCurrentEntries, recordMoveUndo, runWithActivity, showToast]
   );
 
   const handleToggleTag = useCallback(
@@ -2280,6 +2559,17 @@ export const App: React.FC = () => {
       const hasDirs =
         entry.isDir || draggedEntries.some((item) => item.isDir);
 
+      const isArchiveSource = Boolean(
+        isArchiveWorkspace ||
+          findArchiveRootFromPath(entry.path) ||
+          dragPaths.some((p) => findArchiveRootFromPath(p)) ||
+          (startedInSplitPane &&
+            Boolean(
+              splitPane?.archiveWorkspaceRoot ||
+                (splitPane?.path && findArchiveRootFromPath(splitPane.path))
+            ))
+      );
+
       let isDragging = false;
       let latestDropPath: string | null = null;
       let latestDropName: string | null = null;
@@ -2362,6 +2652,15 @@ export const App: React.FC = () => {
                 dropFavoriteZone: false,
               };
             }
+            if (findArchiveRootFromPath(candidatePath)) {
+              return {
+                dropTargetPath: null,
+                dropTargetName: null,
+                dropTargetTag: null,
+                dropTargetTagName: null,
+                dropFavoriteZone: false,
+              };
+            }
             // Cannot drop a folder into itself or its own descendant
             const invalidSelfDrop = dragPaths.some(
               (src) =>
@@ -2433,7 +2732,7 @@ export const App: React.FC = () => {
         if (dragRaf === null) {
           const clientX = ev.clientX;
           const clientY = ev.clientY;
-          const isCopy = ev.altKey || ev.ctrlKey;
+          const isCopy = isArchiveSource || ev.altKey || ev.ctrlKey;
           dragRaf = requestAnimationFrame(() => {
             dragRaf = null;
             const resolved = resolveDropTarget(clientX, clientY, isCopy);
@@ -2482,7 +2781,7 @@ export const App: React.FC = () => {
         }
 
         setDragState(null);
-        const isCopy = ev.altKey || ev.ctrlKey;
+        const isCopy = isArchiveSource || ev.altKey || ev.ctrlKey;
 
         // Handle Drop onto Folder / Volume / Favorite / Tab / Path Bar
         if (latestDropPath) {
@@ -2494,6 +2793,10 @@ export const App: React.FC = () => {
               ?.closest("[data-split-pane]")
           );
           if (destDir === "__TRASH__") {
+            if (isArchiveSource) {
+              showToast("Cannot delete items: archives are read-only");
+              return;
+            }
             try {
               await runWithActivity(
                 `Moving ${dragPaths.length} item(s) to Trash...`,
@@ -2810,7 +3113,8 @@ export const App: React.FC = () => {
           if (validSources.length === 0) return;
 
           try {
-            const isFinderMove = await apiCheckFinderDrag(validSources, true);
+            const isArchiveSource = validSources.some((p) => findArchiveRootFromPath(p));
+            const isFinderMove = !isArchiveSource && (await apiCheckFinderDrag(validSources, true));
             if (isFinderMove) {
               const moved = await runWithActivity(
                 `Moving ${validSources.length} item(s)...`,
@@ -3494,19 +3798,32 @@ export const App: React.FC = () => {
           void confirmTrashAction();
           return;
         }
+        return;
       }
+
+      if (
+        renamingPath ||
+        tag === "TEXTAREA" ||
+        (tag === "INPUT" && !targetEl?.hasAttribute("data-file-search"))
+      ) {
+        return;
+      }
+
       // Delete / Supr moves selected files to Trash, even while search has focus.
       const isDeleteKey =
         e.key === "Delete" ||
         e.key === "Del" ||
+        e.key === "Supr" ||
         e.code === "Delete" ||
-        e.keyCode === 46;
+        e.keyCode === 46 ||
+        e.which === 46;
       if (isDeleteKey) {
         e.preventDefault();
-        if (activeTab?.path === "__TRASH__") {
+        const active = getActiveTargets();
+        if (active.currentPath === "__TRASH__" || e.shiftKey) {
           handleDeletePermanently();
         } else {
-          handleTrash();
+          void handleTrash();
         }
         return;
       }
@@ -3575,6 +3892,12 @@ export const App: React.FC = () => {
 
       // Escape -> Close modals, cancel pending download, or clear selection
       if (e.key === "Escape") {
+        if (openingArchive) {
+          setOpeningArchive(null);
+          requestIdRef.current++;
+          goBack();
+          return;
+        }
         if (pendingDownload) handleDismissPendingDownload(pendingDownload.id);
         else if (openWithEntry) setOpenWithEntry(null);
         else if (quickLookEntry) setQuickLookEntry(null);
@@ -3875,23 +4198,29 @@ export const App: React.FC = () => {
       if (cmdOrCtrl && e.key.toLowerCase() === "v") {
         e.preventDefault();
         handlePaste(
-          splitPaneHoveredRef.current ? splitPane?.path : undefined
+          splitPane && (splitPaneHoveredRef.current || activePaneRef.current === "split")
+            ? splitPane.path
+            : undefined
         );
         return;
       }
-      if (cmdOrCtrl && e.key.toLowerCase() === "d" && selectedPaths.length > 0) {
-        e.preventDefault();
-        handleDuplicate();
-        return;
+      if (cmdOrCtrl && e.key.toLowerCase() === "d") {
+        const active = getActiveTargets();
+        if (active.targets.length > 0) {
+          e.preventDefault();
+          void handleDuplicate();
+          return;
+        }
       }
 
       // Ctrl+Backspace -> Move to Trash (or permanently delete if in Trash)
       if (cmdOrCtrl && e.key === "Backspace") {
         e.preventDefault();
-        if (activeTab?.path === "__TRASH__") {
+        const active = getActiveTargets();
+        if (active.currentPath === "__TRASH__" || e.shiftKey) {
           handleDeletePermanently();
         } else {
-          handleTrash();
+          void handleTrash();
         }
       }
     };
@@ -3901,6 +4230,7 @@ export const App: React.FC = () => {
   }, [
     sortedEntries,
     selectedPaths,
+    getActiveTargets,
     openWithEntry,
     quickLookEntry,
     getInfoEntry,
@@ -3971,7 +4301,7 @@ export const App: React.FC = () => {
           lastSelectedPathRef.current = entry.path;
         }
       }
-      setContextMenu({ x: e.clientX, y: e.clientY, entry, targetDir });
+      setContextMenu({ x: e.clientX, y: e.clientY, entry, targetDir, inSplitPane });
     },
     []
   );
@@ -4092,12 +4422,6 @@ export const App: React.FC = () => {
   const activeDropTargetPath =
     dragState?.dropTargetPath ||
     (externalDropInfo?.isSpecificFolder ? externalDropInfo.targetPath : null);
-  const archiveRoot = activeTab?.archiveWorkspaceRoot?.replace(/\\/g, "/").replace(/\/$/, "");
-  const activePath = activeTab?.path.replace(/\\/g, "/").replace(/\/$/, "") || "";
-  const isArchiveWorkspace = Boolean(
-    archiveRoot &&
-      (activePath === archiveRoot || activePath.startsWith(`${archiveRoot}/`))
-  );
 
   const draggedPaths = useMemo(
     () => [
@@ -4455,6 +4779,57 @@ export const App: React.FC = () => {
                   </div>
                 </div>
               )}
+              {isArchiveWorkspace && (
+                <div
+                  className={`flex items-center justify-between gap-3 px-4 py-2 border-b text-xs shrink-0 select-none ${
+                    darkMode
+                      ? "bg-[#282635] border-[#9692D6]/20 text-zinc-200"
+                      : "bg-[#edeaf8] border-[#807bc0]/20 text-zinc-800"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Archive className="w-4 h-4 text-[#a6a0ef] shrink-0" />
+                    <span className="font-semibold truncate">
+                      {archiveRoot ? archiveRoot.split("/").pop() : "Archive Preview"}
+                    </span>
+                    <span className="opacity-60 truncate">
+                      — Archive Preview (Read-only)
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {selectedPaths.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => void handleExtractSelectedItems()}
+                        title="Extract selected item(s) to a folder"
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium text-white bg-[#0a84ff] hover:bg-[#0071e3] transition cursor-pointer shadow-xs"
+                      >
+                        <FolderDown className="w-3.5 h-3.5" />
+                        <span>Extract Selected ({selectedPaths.length})</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (archiveRoot) {
+                          void handleExtractArchive(archiveRoot);
+                        }
+                      }}
+                      title="Extract all files in this archive to a folder"
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium transition cursor-pointer shadow-xs ${
+                        selectedPaths.length > 0
+                          ? darkMode
+                            ? "bg-white/10 hover:bg-white/15 text-zinc-100"
+                            : "bg-white hover:bg-zinc-100 text-zinc-800 border border-black/10"
+                          : "text-white bg-[#0a84ff] hover:bg-[#0071e3]"
+                      }`}
+                    >
+                      <FolderDown className="w-3.5 h-3.5" />
+                      <span>Extract Archive</span>
+                    </button>
+                  </div>
+                </div>
+              )}
               {viewMode === "icons" && <IconView {...commonViewProps} />}
               {viewMode === "list" && <ListView {...commonViewProps} />}
               {viewMode === "columns" && (
@@ -4475,6 +4850,9 @@ export const App: React.FC = () => {
                 initialTag={splitPane.activeTag}
                 darkMode={darkMode}
                 refreshVersion={splitPaneRefreshVersion}
+                onActivePane={() => {
+                  activePaneRef.current = "split";
+                }}
                 onStartItemDrag={handleStartItemDrag}
                 dropTargetPath={activeDropTargetPath}
                 panelWidthPercent={splitPaneRatio * 100}
@@ -4587,7 +4965,11 @@ export const App: React.FC = () => {
       {/* Right-Click Context Menu */}
       <ContextMenu
         menu={contextMenu}
-        selectedPaths={selectedPaths}
+        selectedPaths={
+          contextMenu?.inSplitPane
+            ? splitPaneSelectedPathsRef.current
+            : selectedPaths
+        }
         onClose={() => setContextMenu(null)}
         onOpen={handleOpenEntry}
         onRun={handleRunItem}
@@ -4612,11 +4994,17 @@ export const App: React.FC = () => {
               folderPath,
               folderDisplayName(folderPath, mainPartitionName)
             );
-          } else if (primarySelectedEntry) {
-            setGetInfoVolume(null);
-            setGetInfoEntry(primarySelectedEntry);
           } else {
-            showToast("Folder info is not available for this location");
+            const activeEntry =
+              contextMenu?.inSplitPane && splitPane
+                ? splitPanePrimaryEntry
+                : primarySelectedEntry;
+            if (activeEntry) {
+              setGetInfoVolume(null);
+              setGetInfoEntry(activeEntry);
+            } else {
+              showToast("Folder info is not available for this location");
+            }
           }
         }}
         onRename={startRename}
@@ -4645,12 +5033,29 @@ export const App: React.FC = () => {
         onFormatVolume={setFormatVolume}
         onFirstAidVolume={setFirstAidVolume}
         onToast={showToast}
-        isTrashView={activeTab?.path === "__TRASH__" && !activeTab?.activeTag}
+        isTrashView={
+          contextMenu?.inSplitPane && splitPane
+            ? splitPane.path === "__TRASH__" && !splitPane.activeTag
+            : activeTab?.path === "__TRASH__" && !activeTab?.activeTag
+        }
+        isArchiveWorkspace={
+          contextMenu?.inSplitPane && splitPane
+            ? Boolean(
+                splitPane.archiveWorkspaceRoot ||
+                (splitPane.path && findArchiveRootFromPath(splitPane.path))
+              )
+            : isArchiveWorkspace
+        }
+        onExtractSelected={(entries) => void handleExtractSelectedItems(entries)}
         onRestoreTrash={(entry) => void handleRestoreTrash(entry)}
         onRestoreAllTrash={() => void handleRestoreAllTrash()}
         onDeletePermanently={handleDeletePermanently}
         onEmptyTrash={() => void handleEmptyTrash()}
-        trashEmpty={activeTab?.path === "__TRASH__" && sortedEntries.length === 0}
+        trashEmpty={
+          contextMenu?.inSplitPane && splitPane
+            ? splitPane.path === "__TRASH__" && splitPaneSelectedPathsRef.current.length === 0
+            : activeTab?.path === "__TRASH__" && sortedEntries.length === 0
+        }
       />
 
       {/* Empty Trash / Delete Permanently Confirmation Modal */}
@@ -4811,16 +5216,18 @@ export const App: React.FC = () => {
         </div>
       )}
 
+
       {openingArchive && (
         <div
-          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/35 backdrop-blur-[2px]"
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 backdrop-blur-[2px] select-none cursor-wait"
           role="presentation"
+          onClick={(e) => e.stopPropagation()}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-live="polite"
-            aria-label={`Opening ${openingArchive}`}
+            aria-label={`Opening ${openingArchive.name}`}
             className={`flex w-[min(340px,calc(100vw-40px))] flex-col items-center gap-3 rounded-2xl border px-8 py-7 text-center shadow-2xl backdrop-blur-xl ${
               darkMode
                 ? "border-white/15 bg-[#29292e]/95 text-zinc-100"
@@ -4829,11 +5236,15 @@ export const App: React.FC = () => {
           >
             <div className="relative flex h-12 w-12 items-center justify-center rounded-xl bg-[#9692D6]/15 text-[#9692D6]">
               <Archive className="h-6 w-6" />
-              <Loader2 className="absolute -right-1 -top-1 h-5 w-5 animate-spin rounded-full bg-inherit" />
+              <Loader2 className="absolute -right-1 -top-1 h-5 w-5 animate-spin rounded-full text-[#9692D6]" />
             </div>
             <span className="text-sm font-semibold">Opening archive…</span>
-            <span className="max-w-full truncate text-xs opacity-60">{openingArchive}</span>
-            <span className="text-[11px] opacity-45">Extracting contents for browsing</span>
+            <span className="max-w-full truncate text-xs opacity-60">
+              {openingArchive.name}
+            </span>
+            <span className="text-[11px] opacity-45">
+              Reading archive contents
+            </span>
           </div>
         </div>
       )}

@@ -194,6 +194,18 @@ export async function apiExtractArchive(path: string): Promise<string> {
   return invoke<string>("extract_archive", { path });
 }
 
+export async function apiExtractArchiveItems(
+  archivePath: string,
+  items: string[],
+  destinationDir?: string
+): Promise<string> {
+  return invoke<string>("extract_archive_items", {
+    archivePath,
+    items,
+    destinationDir: destinationDir ?? null,
+  });
+}
+
 export async function apiTrashItems(paths: string[]): Promise<void> {
   return invoke<void>("trash_items", { paths });
 }

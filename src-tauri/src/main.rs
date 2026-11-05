@@ -1058,6 +1058,7 @@ fn main() {
             commands::duplicate_item,
             commands::compress_items,
             commands::extract_archive,
+            commands::extract_archive_items,
             commands::trash_items,
             commands::get_trash_files,
             commands::restore_trash_items,

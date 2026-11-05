@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
@@ -1683,6 +1683,808 @@ pub fn build_file_entry_from_dir_entry(
     })
 }
 
+fn resolve_input_path(path: &str) -> PathBuf {
+    let home = effective_user_home_dir();
+    if path.is_empty() || path == "~" {
+        home
+    } else if path == "/" {
+        PathBuf::from("/")
+    } else {
+        let clean = path.trim_end_matches('/');
+        if let Some(stripped) = clean.strip_prefix("~/") {
+            home.join(stripped)
+        } else {
+            PathBuf::from(clean)
+        }
+    }
+}
+
+pub fn is_archive_filename(name: &str) -> bool {
+    let lower_name = name.to_lowercase();
+    let suffixes = [
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lzma", ".tgz", ".tbz2", ".tbz", ".txz",
+        ".tzst", ".tar", ".zip",
+    ];
+    suffixes.iter().any(|s| lower_name.ends_with(s))
+}
+
+pub fn split_archive_path(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let clean_str = path.to_string_lossy();
+    let clean_trimmed = if clean_str.len() > 1 {
+        clean_str.trim_end_matches('/')
+    } else {
+        &clean_str
+    };
+    let path_buf = PathBuf::from(clean_trimmed);
+    let path = path_buf.as_path();
+
+    if path.is_file() {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if is_archive_filename(name) {
+                return Some((path.to_path_buf(), PathBuf::new()));
+            }
+        }
+    }
+
+    let mut current = path.parent();
+    while let Some(ancestor) = current {
+        if ancestor.is_file() {
+            if let Some(name) = ancestor.file_name().and_then(|n| n.to_str()) {
+                if is_archive_filename(name) {
+                    if let Ok(rel) = path.strip_prefix(ancestor) {
+                        return Some((ancestor.to_path_buf(), rel.to_path_buf()));
+                    }
+                }
+            }
+        }
+        current = ancestor.parent();
+    }
+    None
+}
+
+fn normalize_entry_path(raw: &str) -> String {
+    let mut s = raw.replace('\\', "/");
+    while s.starts_with("./") {
+        s = s[2..].to_string();
+    }
+    while s.starts_with('/') {
+        s = s[1..].to_string();
+    }
+    while s.contains("//") {
+        s = s.replace("//", "/");
+    }
+    s
+}
+
+fn zip_datetime_to_unix(dt: Option<zip::DateTime>, fallback: i64) -> i64 {
+    if let Some(dt) = dt {
+        chrono::NaiveDate::from_ymd_opt(dt.year() as i32, dt.month() as u32, dt.day() as u32)
+            .and_then(|d| d.and_hms_opt(dt.hour() as u32, dt.minute() as u32, dt.second() as u32))
+            .map(|naive| naive.and_utc().timestamp())
+            .unwrap_or(fallback)
+    } else {
+        fallback
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ArchiveEntryInfo {
+    pub relative_path: String,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+    pub modified: i64,
+    pub mode: u32,
+}
+
+static ARCHIVE_ENTRIES_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u128), Arc<Vec<ArchiveEntryInfo>>>>> =
+    OnceLock::new();
+
+fn get_archive_entries(archive_path: &Path) -> Result<Arc<Vec<ArchiveEntryInfo>>, String> {
+    let mtime = path_mtime_ns(archive_path);
+    let cache_mutex = ARCHIVE_ENTRIES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if mtime > 0 {
+        if let Ok(guard) = cache_mutex.lock() {
+            if let Some(cached) = guard.get(&(archive_path.to_path_buf(), mtime)) {
+                return Ok(Arc::clone(cached));
+            }
+        }
+    }
+
+    let archive_name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let fallback_mtime = fs::metadata(archive_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let mut entries = Vec::new();
+
+    if archive_name.ends_with(".zip") {
+        let file = fs::File::open(archive_path)
+            .map_err(|e| format!("Could not open ZIP archive: {e}"))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("Could not read ZIP archive: {e}"))?;
+
+        for i in 0..archive.len() {
+            let entry = archive
+                .by_index(i)
+                .map_err(|e| format!("Could not read ZIP entry: {e}"))?;
+            let raw_name = entry.name();
+            let norm = normalize_entry_path(raw_name);
+            let is_dir = entry.is_dir() || norm.ends_with('/') || raw_name.ends_with('/');
+            let clean_path = norm.trim_end_matches('/').to_string();
+            if clean_path.is_empty() {
+                continue;
+            }
+            let is_symlink = entry
+                .unix_mode()
+                .map(|mode| mode & 0o170000 == 0o120000)
+                .unwrap_or(false);
+            let mode = entry.unix_mode().unwrap_or(if is_dir { 0o755 } else { 0o644 });
+            let modified = zip_datetime_to_unix(entry.last_modified(), fallback_mtime);
+
+            entries.push(ArchiveEntryInfo {
+                relative_path: clean_path,
+                is_dir,
+                is_symlink,
+                size: if is_dir { 0 } else { entry.size() },
+                modified,
+                mode,
+            });
+        }
+    } else {
+        let reader = open_tarball_reader(archive_path)?;
+        let mut archive = tar::Archive::new(reader);
+        let tar_entries = archive
+            .entries()
+            .map_err(|e| format!("Could not read TAR archive: {e}"))?;
+
+        for entry_res in tar_entries {
+            let entry = entry_res.map_err(|e| format!("Could not read TAR entry: {e}"))?;
+            let raw_path = entry
+                .path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let norm = normalize_entry_path(&raw_path);
+            let entry_type = entry.header().entry_type();
+            let is_dir = entry_type.is_dir() || norm.ends_with('/') || raw_path.ends_with('/');
+            let clean_path = norm.trim_end_matches('/').to_string();
+            if clean_path.is_empty() {
+                continue;
+            }
+            let is_symlink = entry_type.is_symlink();
+            let size = if is_dir {
+                0
+            } else {
+                entry.header().size().unwrap_or(0)
+            };
+            let modified = entry.header().mtime().unwrap_or(fallback_mtime as u64) as i64;
+            let mode = entry
+                .header()
+                .mode()
+                .unwrap_or(if is_dir { 0o755 } else { 0o644 });
+
+            entries.push(ArchiveEntryInfo {
+                relative_path: clean_path,
+                is_dir,
+                is_symlink,
+                size,
+                modified,
+                mode,
+            });
+        }
+    }
+
+    let arc = Arc::new(entries);
+    if mtime > 0 {
+        if let Ok(mut guard) = cache_mutex.lock() {
+            guard.insert((archive_path.to_path_buf(), mtime), Arc::clone(&arc));
+        }
+    }
+    Ok(arc)
+}
+
+fn read_archive_directory_sync(
+    archive_path: &Path,
+    subpath: &Path,
+    show_hidden: bool,
+) -> Result<Vec<FileEntry>, String> {
+    let all_entries = get_archive_entries(archive_path)?;
+    let target_str = normalize_entry_path(&subpath.to_string_lossy());
+    let target_norm = target_str.trim_matches('/').to_string();
+
+    struct ChildCollector {
+        is_dir: bool,
+        is_symlink: bool,
+        size: u64,
+        modified: i64,
+        mode: u32,
+    }
+
+    let mut direct_children: HashMap<String, ChildCollector> = HashMap::new();
+
+    for entry in all_entries.iter() {
+        let rel = entry.relative_path.as_str();
+
+        if target_norm.is_empty() {
+            if let Some((first_comp, _)) = rel.split_once('/') {
+                let existing = direct_children
+                    .entry(first_comp.to_string())
+                    .or_insert_with(|| ChildCollector {
+                        is_dir: true,
+                        is_symlink: false,
+                        size: 0,
+                        modified: entry.modified,
+                        mode: 0o755,
+                    });
+                existing.is_dir = true;
+                if entry.modified > existing.modified {
+                    existing.modified = entry.modified;
+                }
+            } else {
+                let existing = direct_children
+                    .entry(rel.to_string())
+                    .or_insert_with(|| ChildCollector {
+                        is_dir: entry.is_dir,
+                        is_symlink: entry.is_symlink,
+                        size: entry.size,
+                        modified: entry.modified,
+                        mode: entry.mode,
+                    });
+                if entry.is_dir {
+                    existing.is_dir = true;
+                } else if !existing.is_dir {
+                    existing.size = entry.size;
+                    existing.is_symlink = entry.is_symlink;
+                    existing.mode = entry.mode;
+                }
+                if entry.modified > existing.modified {
+                    existing.modified = entry.modified;
+                }
+            }
+        } else {
+            let prefix = format!("{target_norm}/");
+            if let Some(rest) = rel.strip_prefix(&prefix) {
+                if rest.is_empty() {
+                    continue;
+                }
+                if let Some((first_comp, _)) = rest.split_once('/') {
+                    let existing = direct_children
+                        .entry(first_comp.to_string())
+                        .or_insert_with(|| ChildCollector {
+                            is_dir: true,
+                            is_symlink: false,
+                            size: 0,
+                            modified: entry.modified,
+                            mode: 0o755,
+                        });
+                    existing.is_dir = true;
+                    if entry.modified > existing.modified {
+                        existing.modified = entry.modified;
+                    }
+                } else {
+                    let existing = direct_children
+                        .entry(rest.to_string())
+                        .or_insert_with(|| ChildCollector {
+                            is_dir: entry.is_dir,
+                            is_symlink: entry.is_symlink,
+                            size: entry.size,
+                            modified: entry.modified,
+                            mode: entry.mode,
+                        });
+                    if entry.is_dir {
+                        existing.is_dir = true;
+                    } else if !existing.is_dir {
+                        existing.size = entry.size;
+                        existing.is_symlink = entry.is_symlink;
+                        existing.mode = entry.mode;
+                    }
+                    if entry.modified > existing.modified {
+                        existing.modified = entry.modified;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::with_capacity(direct_children.len());
+
+    for (child_name, child) in direct_children {
+        if !show_hidden && child_name.starts_with('.') {
+            continue;
+        }
+
+        let child_virtual_path = if target_norm.is_empty() {
+            format!("{}/{}", archive_path.to_string_lossy(), child_name)
+        } else {
+            format!(
+                "{}/{}/{}",
+                archive_path.to_string_lossy(),
+                target_norm,
+                child_name
+            )
+        };
+
+        let extension = if child.is_dir {
+            String::new()
+        } else {
+            Path::new(&child_name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+
+        let mime_type = if child.is_dir {
+            "inode/directory".to_string()
+        } else {
+            let fast = fast_mime_type(&extension);
+            if !fast.is_empty() {
+                fast.to_string()
+            } else {
+                mime_guess::from_path(&child_name)
+                    .first_or_octet_stream()
+                    .to_string()
+            }
+        };
+
+        let kind = describe_kind(child.is_dir, &extension, &mime_type);
+        let permissions = format_unix_permissions(child.mode, child.is_dir);
+
+        let child_count = if child.is_dir {
+            let dir_prefix = if target_norm.is_empty() {
+                format!("{child_name}/")
+            } else {
+                format!("{target_norm}/{child_name}/")
+            };
+            let mut immediate_sub = std::collections::HashSet::new();
+            for entry in all_entries.iter() {
+                if let Some(sub_rest) = entry.relative_path.strip_prefix(&dir_prefix) {
+                    if !sub_rest.is_empty() {
+                        let sub_comp = sub_rest.split('/').next().unwrap_or("");
+                        if !sub_comp.is_empty() {
+                            immediate_sub.insert(sub_comp.to_string());
+                        }
+                    }
+                }
+            }
+            Some(immediate_sub.len())
+        } else {
+            None
+        };
+
+        result.push(FileEntry {
+            name: child_name,
+            path: child_virtual_path,
+            is_dir: child.is_dir,
+            is_symlink: child.is_symlink,
+            is_hidden: false,
+            size: child.size,
+            modified: child.modified,
+            created: child.modified,
+            extension,
+            kind,
+            mime_type,
+            permissions,
+            is_readonly: true,
+            child_count,
+            tags: Vec::new(),
+            default_app: None,
+            original_path: None,
+            deleted_at: None,
+            is_executable: !child.is_dir && (child.mode & 0o111 != 0),
+        });
+    }
+
+    Ok(result)
+}
+
+fn search_archive_sync(
+    archive_path: &Path,
+    subpath: &Path,
+    query: &str,
+    show_hidden: bool,
+) -> Result<Vec<FileEntry>, String> {
+    let all_entries = get_archive_entries(archive_path)?;
+    let target_str = normalize_entry_path(&subpath.to_string_lossy());
+    let target_norm = target_str.trim_matches('/').to_string();
+    let q = query.to_lowercase();
+
+    let mut result = Vec::new();
+
+    for entry in all_entries.iter() {
+        let rel = entry.relative_path.as_str();
+
+        if !target_norm.is_empty() {
+            let prefix = format!("{target_norm}/");
+            if !rel.starts_with(&prefix) {
+                continue;
+            }
+        }
+
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+
+        if !name.to_lowercase().contains(&q) {
+            continue;
+        }
+
+        let child_virtual_path = format!("{}/{}", archive_path.to_string_lossy(), rel);
+        let extension = if entry.is_dir {
+            String::new()
+        } else {
+            Path::new(name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+        let mime_type = if entry.is_dir {
+            "inode/directory".to_string()
+        } else {
+            let fast = fast_mime_type(&extension);
+            if !fast.is_empty() {
+                fast.to_string()
+            } else {
+                mime_guess::from_path(name)
+                    .first_or_octet_stream()
+                    .to_string()
+            }
+        };
+        let kind = describe_kind(entry.is_dir, &extension, &mime_type);
+        let permissions = format_unix_permissions(entry.mode, entry.is_dir);
+
+        result.push(FileEntry {
+            name: name.to_string(),
+            path: child_virtual_path,
+            is_dir: entry.is_dir,
+            is_symlink: entry.is_symlink,
+            is_hidden: name.starts_with('.'),
+            size: entry.size,
+            modified: entry.modified,
+            created: entry.modified,
+            extension,
+            kind,
+            mime_type,
+            permissions,
+            is_readonly: true,
+            child_count: None,
+            tags: Vec::new(),
+            default_app: None,
+            original_path: None,
+            deleted_at: None,
+            is_executable: !entry.is_dir && (entry.mode & 0o111 != 0),
+        });
+    }
+
+    Ok(result)
+}
+
+fn extract_single_archive_entry_to_cache(
+    archive_path: &Path,
+    subpath: &Path,
+) -> Result<PathBuf, String> {
+    use md5::Digest;
+    let subpath_norm = normalize_entry_path(&subpath.to_string_lossy());
+    let clean_subpath = subpath_norm.trim_matches('/');
+    if clean_subpath.is_empty() {
+        return Err("Cannot extract empty subpath".to_string());
+    }
+
+    let mtime = path_mtime_ns(archive_path);
+    let hash_str: String = md5::Md5::digest(archive_path.to_string_lossy().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let cache_dir = std::env::temp_dir()
+        .join("vfinder_archive_cache")
+        .join(format!("{hash_str}_{mtime}"));
+
+    let dest_path = cache_dir.join(clean_subpath);
+
+    if dest_path.is_file() {
+        if let Ok(meta) = fs::metadata(&dest_path) {
+            if meta.len() > 0 {
+                return Ok(dest_path);
+            }
+        }
+    }
+
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Could not create cache directory: {e}"))?;
+    }
+
+    let archive_name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    if archive_name.ends_with(".zip") {
+        let file = fs::File::open(archive_path)
+            .map_err(|e| format!("Could not open ZIP archive: {e}"))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("Could not read ZIP archive: {e}"))?;
+
+        let target_idx = archive
+            .index_for_name(clean_subpath)
+            .or_else(|| archive.index_for_name(&format!("./{clean_subpath}")))
+            .ok_or_else(|| format!("Could not find file '{clean_subpath}' in ZIP archive"))?;
+
+        let mut entry = archive
+            .by_index(target_idx)
+            .map_err(|e| format!("Could not read ZIP entry: {e}"))?;
+
+        let mut out = fs::File::create(&dest_path)
+            .map_err(|e| format!("Could not create cache file: {e}"))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("Could not extract file from ZIP: {e}"))?;
+    } else {
+        let reader = open_tarball_reader(archive_path)?;
+        let mut archive = tar::Archive::new(reader);
+        let entries = archive
+            .entries()
+            .map_err(|e| format!("Could not read TAR archive: {e}"))?;
+
+        let mut found = false;
+        for entry_res in entries {
+            let mut entry = entry_res.map_err(|e| format!("Could not read TAR entry: {e}"))?;
+            let raw_p = entry
+                .path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let norm = normalize_entry_path(&raw_p);
+            let check_p = norm.trim_matches('/');
+            if check_p == clean_subpath {
+                let mut out = fs::File::create(&dest_path)
+                    .map_err(|e| format!("Could not create cache file: {e}"))?;
+                std::io::copy(&mut entry, &mut out)
+                    .map_err(|e| format!("Could not extract file from TAR: {e}"))?;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(format!("Entry {clean_subpath} not found in TAR archive"));
+        }
+    }
+
+    Ok(dest_path)
+}
+
+fn extract_archive_entry_or_dir(
+    archive_path: &Path,
+    clean_item: &str,
+    target_dir: &Path,
+) -> Result<(), String> {
+    let archive_name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let prefix_match = format!("{clean_item}/");
+
+    if archive_name.ends_with(".zip") {
+        let file = fs::File::open(archive_path)
+            .map_err(|e| format!("Could not open ZIP archive: {e}"))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("Could not read ZIP archive: {e}"))?;
+
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| format!("Could not read ZIP entry: {e}"))?;
+            let enclosed = match entry.enclosed_name() {
+                Some(name) => name.to_path_buf(),
+                None => continue,
+            };
+            let norm_enclosed = normalize_entry_path(&enclosed.to_string_lossy());
+            let clean_enclosed = norm_enclosed.trim_matches('/').to_string();
+
+            let is_match =
+                clean_enclosed == clean_item || clean_enclosed.starts_with(&prefix_match);
+            if !is_match {
+                continue;
+            }
+
+            let rel_sub = if clean_enclosed == clean_item {
+                PathBuf::from(clean_item.rsplit('/').next().unwrap_or(clean_item))
+            } else if let Some(sub) = clean_enclosed.strip_prefix(&prefix_match) {
+                let base_name = clean_item.rsplit('/').next().unwrap_or(clean_item);
+                PathBuf::from(base_name).join(sub)
+            } else {
+                PathBuf::from(clean_enclosed)
+            };
+
+            let dest = target_dir.join(rel_sub);
+            if entry.is_dir() {
+                fs::create_dir_all(&dest)
+                    .map_err(|e| format!("Could not create directory: {e}"))?;
+                continue;
+            }
+
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Could not create directory: {e}"))?;
+            }
+            let mut out = fs::File::create(&dest)
+                .map_err(|e| format!("Could not create file: {e}"))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("Could not extract file: {e}"))?;
+        }
+    } else {
+        let reader = open_tarball_reader(archive_path)?;
+        let mut archive = tar::Archive::new(reader);
+        let entries = archive
+            .entries()
+            .map_err(|e| format!("Could not read TAR archive: {e}"))?;
+
+        for entry_res in entries {
+            let mut entry = entry_res.map_err(|e| format!("Could not read TAR entry: {e}"))?;
+            let raw_path = entry
+                .path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let norm = normalize_entry_path(&raw_path);
+            let clean_enclosed = norm.trim_matches('/').to_string();
+
+            let is_match =
+                clean_enclosed == clean_item || clean_enclosed.starts_with(&prefix_match);
+            if !is_match {
+                continue;
+            }
+
+            let rel_sub = if clean_enclosed == clean_item {
+                PathBuf::from(clean_item.rsplit('/').next().unwrap_or(clean_item))
+            } else if let Some(sub) = clean_enclosed.strip_prefix(&prefix_match) {
+                let base_name = clean_item.rsplit('/').next().unwrap_or(clean_item);
+                PathBuf::from(base_name).join(sub)
+            } else {
+                PathBuf::from(clean_enclosed)
+            };
+
+            let dest = target_dir.join(rel_sub);
+            if entry.header().entry_type().is_dir() {
+                fs::create_dir_all(&dest)
+                    .map_err(|e| format!("Could not create directory: {e}"))?;
+                continue;
+            }
+
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Could not create directory: {e}"))?;
+            }
+            let mut out = fs::File::create(&dest)
+                .map_err(|e| format!("Could not create file: {e}"))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("Could not extract file: {e}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn get_archive_entry_file_entry(
+    archive_path: &Path,
+    subpath: &Path,
+) -> Result<FileEntry, String> {
+    let all_entries = get_archive_entries(archive_path)?;
+    let subpath_norm = normalize_entry_path(&subpath.to_string_lossy());
+    let clean_subpath = subpath_norm.trim_matches('/').to_string();
+
+    for entry in all_entries.iter() {
+        if entry.relative_path == clean_subpath {
+            let name = clean_subpath
+                .rsplit('/')
+                .next()
+                .unwrap_or(&clean_subpath)
+                .to_string();
+            let child_virtual_path =
+                format!("{}/{}", archive_path.to_string_lossy(), clean_subpath);
+            let extension = if entry.is_dir {
+                String::new()
+            } else {
+                Path::new(&name)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_default()
+            };
+            let mime_type = if entry.is_dir {
+                "inode/directory".to_string()
+            } else {
+                let fast = fast_mime_type(&extension);
+                if !fast.is_empty() {
+                    fast.to_string()
+                } else {
+                    mime_guess::from_path(&name)
+                        .first_or_octet_stream()
+                        .to_string()
+                }
+            };
+            let kind = describe_kind(entry.is_dir, &extension, &mime_type);
+            let permissions = format_unix_permissions(entry.mode, entry.is_dir);
+
+            return Ok(FileEntry {
+                name,
+                path: child_virtual_path,
+                is_dir: entry.is_dir,
+                is_symlink: entry.is_symlink,
+                is_hidden: false,
+                size: entry.size,
+                modified: entry.modified,
+                created: entry.modified,
+                extension,
+                kind,
+                mime_type,
+                permissions,
+                is_readonly: true,
+                child_count: None,
+                tags: Vec::new(),
+                default_app: None,
+                original_path: None,
+                deleted_at: None,
+                is_executable: !entry.is_dir && (entry.mode & 0o111 != 0),
+            });
+        }
+    }
+
+    Err(format!("Entry {clean_subpath} not found in archive"))
+}
+
+#[tauri::command]
+pub async fn extract_archive_items(
+    archive_path: String,
+    items: Vec<String>,
+    destination_dir: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let arch = resolve_input_path(&archive_path);
+        let actual_archive = if let Some((parent_arch, _)) = split_archive_path(&arch) {
+            parent_arch
+        } else {
+            arch
+        };
+        if !actual_archive.is_file() {
+            return Err("Archive file does not exist".to_string());
+        }
+        let target_dir = if let Some(dest) = destination_dir {
+            resolve_input_path(&dest)
+        } else {
+            actual_archive
+                .parent()
+                .ok_or_else(|| "Cannot determine archive parent".to_string())?
+                .to_path_buf()
+        };
+
+        if !target_dir.is_dir() {
+            fs::create_dir_all(&target_dir)
+                .map_err(|e| format!("Could not create destination directory: {e}"))?;
+        }
+
+        for item_rel in items {
+            let norm_item = normalize_entry_path(&item_rel);
+            let clean_item = norm_item.trim_matches('/');
+            if clean_item.is_empty() {
+                continue;
+            }
+            extract_archive_entry_or_dir(&actual_archive, clean_item, &target_dir)?;
+        }
+
+        bump_cache_version();
+        Ok(target_dir.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn read_directory_sync(path: String, show_hidden: bool) -> Result<Vec<FileEntry>, String> {
     if path == "__RECENTS__" {
         return get_recent_files_sync(show_hidden);
@@ -1690,14 +2492,12 @@ fn read_directory_sync(path: String, show_hidden: bool) -> Result<Vec<FileEntry>
     if path == "__TRASH__" {
         return get_trash_files_sync(show_hidden);
     }
-    let home = effective_user_home_dir();
-    let resolved_path = if path.is_empty() || path == "~" {
-        home
-    } else if let Some(stripped) = path.strip_prefix("~/") {
-        home.join(stripped)
-    } else {
-        PathBuf::from(&path)
-    };
+    let resolved_path = resolve_input_path(&path);
+
+    if let Some((archive_path, subpath)) = split_archive_path(&resolved_path) {
+        return read_archive_directory_sync(&archive_path, &subpath, show_hidden);
+    }
+
     if !resolved_path.exists() {
         return Err(format!("Folder does not exist: {}", resolved_path.display()));
     }
@@ -2048,6 +2848,19 @@ pub async fn copy_items(
         let mut created = Vec::new();
         for src_str in sources {
             let src = Path::new(&src_str);
+            if let Some((archive_path, subpath)) = split_archive_path(src) {
+                if !subpath.as_os_str().is_empty() {
+                    let norm_sub = normalize_entry_path(&subpath.to_string_lossy());
+                    let clean_sub = norm_sub.trim_matches('/').to_string();
+                    if !clean_sub.is_empty() {
+                        let base_name = clean_sub.rsplit('/').next().unwrap_or(&clean_sub);
+                        let target = unique_destination_path(dest_root, base_name);
+                        extract_archive_entry_or_dir(&archive_path, &clean_sub, dest_root)?;
+                        created.push(target.to_string_lossy().to_string());
+                        continue;
+                    }
+                }
+            }
             if !src.exists() {
                 continue;
             }
@@ -2103,6 +2916,19 @@ pub async fn move_items(
         let mut moved = Vec::new();
         for src_str in sources {
             let src = Path::new(&src_str);
+            if let Some((archive_path, subpath)) = split_archive_path(src) {
+                if !subpath.as_os_str().is_empty() {
+                    let norm_sub = normalize_entry_path(&subpath.to_string_lossy());
+                    let clean_sub = norm_sub.trim_matches('/').to_string();
+                    if !clean_sub.is_empty() {
+                        let base_name = clean_sub.rsplit('/').next().unwrap_or(&clean_sub);
+                        let target = unique_destination_path(dest_root, base_name);
+                        extract_archive_entry_or_dir(&archive_path, &clean_sub, dest_root)?;
+                        moved.push(target.to_string_lossy().to_string());
+                        continue;
+                    }
+                }
+            }
             if !src.exists() {
                 continue;
             }
@@ -2293,7 +3119,12 @@ pub async fn compress_items(paths: Vec<String>) -> Result<String, String> {
 #[tauri::command]
 pub async fn extract_archive(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let archive_path = PathBuf::from(&path);
+        let input_path = resolve_input_path(&path);
+        let archive_path = if let Some((arch, _)) = split_archive_path(&input_path) {
+            arch
+        } else {
+            input_path
+        };
         let parent = archive_path
             .parent()
             .ok_or_else(|| "Cannot determine archive folder".to_string())?;
@@ -2446,6 +3277,7 @@ fn open_tarball_reader(path: &Path) -> Result<Box<dyn Read>, String> {
         Err("Unsupported archive format".to_string())
     }
 }
+
 
 fn active_trash_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -3079,36 +3911,47 @@ fn launch_in_terminal(path: &Path) -> Result<(), String> {
     Err("No supported terminal emulator found (tried $TERMINAL, konsole, gnome-terminal, kitty, alacritty, xterm)".to_string())
 }
 
+fn open_real_item(p: &Path) -> Result<(), String> {
+    let path = p.to_string_lossy().to_string();
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let cfg = load_open_with_config();
+    if let Some(program) = resolve_default_app(&path, &ext, &cfg) {
+        return launch_with_program(&path, &program);
+    }
+
+    if ext == "desktop" {
+        return launch_desktop_file(p);
+    }
+
+    if is_appimage_file(p, &ext) {
+        return launch_executable_binary(p);
+    }
+
+    if ext == "bin" || ext == "run" || is_elf_executable_file(p, &ext) {
+        return launch_executable_binary(p);
+    }
+
+    if ext == "command" {
+        return launch_in_terminal(p);
+    }
+
+    open::that(&path).map_err(|e| format!("Failed to open '{}': {}", path, e))
+}
+
 #[tauri::command]
 pub async fn open_item(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let p = Path::new(&path);
-        let ext = p
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let cfg = load_open_with_config();
-        if let Some(program) = resolve_default_app(&path, &ext, &cfg) {
-            return launch_with_program(&path, &program);
+        let resolved = resolve_input_path(&path);
+        if let Some((archive_path, subpath)) = split_archive_path(&resolved) {
+            if !subpath.as_os_str().is_empty() {
+                let extracted = extract_single_archive_entry_to_cache(&archive_path, &subpath)?;
+                return open_real_item(&extracted);
+            }
         }
-
-        if ext == "desktop" {
-            return launch_desktop_file(p);
-        }
-
-        if is_appimage_file(p, &ext) {
-            return launch_executable_binary(p);
-        }
-
-        if ext == "bin" || ext == "run" || is_elf_executable_file(p, &ext) {
-            return launch_executable_binary(p);
-        }
-
-        if ext == "command" {
-            return launch_in_terminal(p);
-        }
-
-        open::that(&path).map_err(|e| format!("Failed to open '{}': {}", path, e))
+        open_real_item(&resolved)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3145,9 +3988,18 @@ pub async fn run_item_in_terminal(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn open_item_with(path: String, program: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || launch_with_program(&path, &program))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = resolve_input_path(&path);
+        if let Some((archive_path, subpath)) = split_archive_path(&resolved) {
+            if !subpath.as_os_str().is_empty() {
+                let extracted = extract_single_archive_entry_to_cache(&archive_path, &subpath)?;
+                return launch_with_program(&extracted.to_string_lossy(), &program);
+            }
+        }
+        launch_with_program(&path, &program)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -3185,149 +4037,85 @@ pub async fn set_default_app(
 
 #[tauri::command]
 pub fn get_file_preview_url(path: String) -> Result<String, String> {
-    let file_path = Path::new(&path);
-    if !file_path.is_file() {
+    let resolved = resolve_input_path(&path);
+    if let Some((archive_path, subpath)) = split_archive_path(&resolved) {
+        if !subpath.as_os_str().is_empty() {
+            let extracted = extract_single_archive_entry_to_cache(&archive_path, &subpath)?;
+            return crate::download_server::register_file_preview(&extracted);
+        }
+    }
+    if !resolved.is_file() {
         return Err("Preview file no longer exists".to_string());
     }
-    crate::download_server::register_file_preview(file_path)
+    crate::download_server::register_file_preview(&resolved)
 }
 
-#[tauri::command]
-pub async fn read_file_preview(
-    path: String,
-    max_bytes: Option<usize>,
-) -> Result<FilePreview, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let p = Path::new(&path);
-        if !p.exists() {
-            return Err("File no longer exists".to_string());
-        }
-        let tags_map = load_tags_map();
-        let entry = build_file_entry(p, &tags_map, true)
-            .ok_or_else(|| "Unable to read metadata".to_string())?;
+fn read_file_preview_internal(p: &Path, max_bytes: Option<usize>) -> Result<FilePreview, String> {
+    if !p.exists() {
+        return Err("File no longer exists".to_string());
+    }
+    let tags_map = load_tags_map();
+    let entry = build_file_entry(p, &tags_map, true)
+        .ok_or_else(|| "Unable to read metadata".to_string())?;
 
-        if entry.is_dir {
-            return Ok(FilePreview {
-                path: entry.path,
-                name: entry.name,
-                kind: entry.kind,
-                mime_type: entry.mime_type,
-                size: entry.size,
-                modified: entry.modified,
-                created: entry.created,
-                permissions: entry.permissions,
-                is_dir: true,
-                child_count: entry.child_count,
-                preview_type: "directory".to_string(),
-                text_content: None,
-                data_url: None,
-                truncated: false,
-            });
-        }
+    if entry.is_dir {
+        return Ok(FilePreview {
+            path: entry.path,
+            name: entry.name,
+            kind: entry.kind,
+            mime_type: entry.mime_type,
+            size: entry.size,
+            modified: entry.modified,
+            created: entry.created,
+            permissions: entry.permissions,
+            is_dir: true,
+            child_count: entry.child_count,
+            preview_type: "directory".to_string(),
+            text_content: None,
+            data_url: None,
+            truncated: false,
+        });
+    }
 
-        let ext = entry.extension.as_str();
-        let is_image = matches!(
-            ext,
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "jfif"
-        );
-        let is_video = matches!(
-            ext,
-            "mp4" | "m4v" | "mkv" | "mov" | "webm" | "avi" | "mpeg" | "mpg" | "3gp"
-        ) || entry.mime_type.starts_with("video/");
-        let is_pdf = ext == "pdf" || entry.mime_type == "application/pdf";
+    let ext = entry.extension.as_str();
+    let is_image = matches!(
+        ext,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "jfif"
+    );
+    let is_video = matches!(
+        ext,
+        "mp4" | "m4v" | "mkv" | "mov" | "webm" | "avi" | "mpeg" | "mpg" | "3gp"
+    ) || entry.mime_type.starts_with("video/");
+    let is_pdf = ext == "pdf" || entry.mime_type == "application/pdf";
 
-        if is_image && entry.size <= 15 * 1024 * 1024 {
-            let bytes = fs::read(p).map_err(|e| e.to_string())?;
-            let mime = if ext == "svg" {
-                "image/svg+xml"
-            } else {
-                entry.mime_type.as_str()
-            };
-            let encoded = BASE64.encode(&bytes);
-            return Ok(FilePreview {
-                path: entry.path,
-                name: entry.name,
-                kind: entry.kind,
-                mime_type: entry.mime_type.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                created: entry.created,
-                permissions: entry.permissions,
-                is_dir: false,
-                child_count: None,
-                preview_type: "image".to_string(),
-                text_content: None,
-                data_url: Some(format!("data:{};base64,{}", mime, encoded)),
-                truncated: false,
-            });
-        }
+    if is_image && entry.size <= 15 * 1024 * 1024 {
+        let bytes = fs::read(p).map_err(|e| e.to_string())?;
+        let mime = if ext == "svg" {
+            "image/svg+xml"
+        } else {
+            entry.mime_type.as_str()
+        };
+        let encoded = BASE64.encode(&bytes);
+        return Ok(FilePreview {
+            path: entry.path,
+            name: entry.name,
+            kind: entry.kind,
+            mime_type: entry.mime_type.clone(),
+            size: entry.size,
+            modified: entry.modified,
+            created: entry.created,
+            permissions: entry.permissions,
+            is_dir: false,
+            child_count: None,
+            preview_type: "image".to_string(),
+            text_content: None,
+            data_url: Some(format!("data:{};base64,{}", mime, encoded)),
+            truncated: false,
+        });
+    }
 
-        if is_video {
-            return Ok(FilePreview {
-                path: entry.path,
-                name: entry.name,
-                kind: entry.kind,
-                mime_type: entry.mime_type,
-                size: entry.size,
-                modified: entry.modified,
-                created: entry.created,
-                permissions: entry.permissions,
-                is_dir: false,
-                child_count: None,
-                preview_type: "video".to_string(),
-                text_content: None,
-                data_url: None,
-                truncated: false,
-            });
-        }
-
-        if is_pdf {
-            return Ok(FilePreview {
-                path: entry.path,
-                name: entry.name,
-                kind: entry.kind,
-                mime_type: "application/pdf".to_string(),
-                size: entry.size,
-                modified: entry.modified,
-                created: entry.created,
-                permissions: entry.permissions,
-                is_dir: false,
-                child_count: None,
-                preview_type: "pdf".to_string(),
-                text_content: None,
-                data_url: None,
-                truncated: false,
-            });
-        }
-
-        let limit = max_bytes.unwrap_or(64 * 1024);
-        let mut file = fs::File::open(p).map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; limit.min(entry.size as usize)];
-        let bytes_read = file.read(&mut buf).map_err(|e| e.to_string())?;
-        buf.truncate(bytes_read);
-
-        let is_binary = buf.iter().take(1024).any(|&b| b == 0);
-        if !is_binary {
-            let text = String::from_utf8_lossy(&buf).to_string();
-            return Ok(FilePreview {
-                path: entry.path,
-                name: entry.name,
-                kind: entry.kind,
-                mime_type: entry.mime_type,
-                size: entry.size,
-                modified: entry.modified,
-                created: entry.created,
-                permissions: entry.permissions,
-                is_dir: false,
-                child_count: None,
-                preview_type: "text".to_string(),
-                text_content: Some(text),
-                data_url: None,
-                truncated: (entry.size as usize) > bytes_read,
-            });
-        }
-
-        Ok(FilePreview {
+    if is_video {
+        return Ok(FilePreview {
             path: entry.path,
             name: entry.name,
             kind: entry.kind,
@@ -3338,11 +4126,93 @@ pub async fn read_file_preview(
             permissions: entry.permissions,
             is_dir: false,
             child_count: None,
-            preview_type: "binary".to_string(),
+            preview_type: "video".to_string(),
             text_content: None,
             data_url: None,
             truncated: false,
-        })
+        });
+    }
+
+    if is_pdf {
+        return Ok(FilePreview {
+            path: entry.path,
+            name: entry.name,
+            kind: entry.kind,
+            mime_type: "application/pdf".to_string(),
+            size: entry.size,
+            modified: entry.modified,
+            created: entry.created,
+            permissions: entry.permissions,
+            is_dir: false,
+            child_count: None,
+            preview_type: "pdf".to_string(),
+            text_content: None,
+            data_url: None,
+            truncated: false,
+        });
+    }
+
+    let limit = max_bytes.unwrap_or(64 * 1024);
+    let mut file = fs::File::open(p).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; limit.min(entry.size as usize)];
+    let bytes_read = file.read(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(bytes_read);
+
+    let is_binary = buf.iter().take(1024).any(|&b| b == 0);
+    if !is_binary {
+        let text = String::from_utf8_lossy(&buf).to_string();
+        return Ok(FilePreview {
+            path: entry.path,
+            name: entry.name,
+            kind: entry.kind,
+            mime_type: entry.mime_type,
+            size: entry.size,
+            modified: entry.modified,
+            created: entry.created,
+            permissions: entry.permissions,
+            is_dir: false,
+            child_count: None,
+            preview_type: "text".to_string(),
+            text_content: Some(text),
+            data_url: None,
+            truncated: (entry.size as usize) > bytes_read,
+        });
+    }
+
+    Ok(FilePreview {
+        path: entry.path,
+        name: entry.name,
+        kind: entry.kind,
+        mime_type: entry.mime_type,
+        size: entry.size,
+        modified: entry.modified,
+        created: entry.created,
+        permissions: entry.permissions,
+        is_dir: false,
+        child_count: None,
+        preview_type: "binary".to_string(),
+        text_content: None,
+        data_url: None,
+        truncated: false,
+    })
+}
+
+#[tauri::command]
+pub async fn read_file_preview(
+    path: String,
+    max_bytes: Option<usize>,
+) -> Result<FilePreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = resolve_input_path(&path);
+        if let Some((archive_path, subpath)) = split_archive_path(&resolved) {
+            if !subpath.as_os_str().is_empty() {
+                let extracted = extract_single_archive_entry_to_cache(&archive_path, &subpath)?;
+                let mut preview = read_file_preview_internal(&extracted, max_bytes)?;
+                preview.path = path;
+                return Ok(preview);
+            }
+        }
+        read_file_preview_internal(&resolved, max_bytes)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3364,14 +4234,10 @@ pub async fn search_directory(
         let open_cfg = load_open_with_config();
         let mut results = Vec::new();
         let mut queue = std::collections::VecDeque::new();
-        let home = effective_user_home_dir();
-        let root = if root_path.is_empty() || root_path == "~" {
-            home
-        } else if let Some(stripped) = root_path.strip_prefix("~/") {
-            home.join(stripped)
-        } else {
-            PathBuf::from(&root_path)
-        };
+        let root = resolve_input_path(&root_path);
+        if let Some((archive_path, subpath)) = split_archive_path(&root) {
+            return search_archive_sync(&archive_path, &subpath, &q, show_hidden);
+        }
         queue.push_back((root, 0usize));
 
         while let Some((dir, depth)) = queue.pop_front() {
@@ -3677,9 +4543,14 @@ pub async fn get_image_thumbnail(
 #[tauri::command]
 pub async fn get_file_info(path: String) -> Result<FileEntry, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let p = Path::new(&path);
+        let resolved = resolve_input_path(&path);
+        if let Some((archive_path, subpath)) = split_archive_path(&resolved) {
+            if !subpath.as_os_str().is_empty() {
+                return get_archive_entry_file_entry(&archive_path, &subpath);
+            }
+        }
         let tags_map = load_tags_map();
-        build_file_entry(p, &tags_map, true)
+        build_file_entry(&resolved, &tags_map, true)
             .ok_or_else(|| "Failed to get item info".to_string())
     })
     .await
@@ -3952,6 +4823,174 @@ mod tests {
                 v.name, v.device, v.file_system, v.is_removable, v.is_system, v.is_mounted, v.mount_point
             );
         }
+    }
+
+    #[test]
+    fn test_archive_filename_recognition() {
+        assert!(is_archive_filename("test.zip"));
+        assert!(is_archive_filename("test.tar.gz"));
+        assert!(is_archive_filename("test.tgz"));
+        assert!(is_archive_filename("test.tar.bz2"));
+        assert!(is_archive_filename("test.tbz2"));
+        assert!(is_archive_filename("test.tar.xz"));
+        assert!(is_archive_filename("test.txz"));
+        assert!(is_archive_filename("test.tar.zst"));
+        assert!(is_archive_filename("test.tar"));
+        assert!(!is_archive_filename("test.txt"));
+        assert!(!is_archive_filename("test.png"));
+        assert!(!is_archive_filename("test.pdf"));
+    }
+
+    #[test]
+    fn test_zip_virtual_browsing_and_preview() {
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir().join("vfinder_test_zip");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let zip_path = tmp_dir.join("sample.zip");
+
+        // Create a test ZIP archive
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            writer.start_file("file1.txt", options).unwrap();
+            writer.write_all(b"Hello World").unwrap();
+
+            writer.start_file("docs/guide.md", options).unwrap();
+            writer.write_all(b"# Guide Content").unwrap();
+
+            writer.start_file("docs/deep/nested.txt", options).unwrap();
+            writer.write_all(b"Deep file content").unwrap();
+
+            writer.finish().unwrap();
+        }
+
+        // Test split_archive_path
+        let (arch, sub) = split_archive_path(&zip_path).unwrap();
+        assert_eq!(arch, zip_path);
+        assert_eq!(sub.as_os_str(), "");
+
+        let (arch2, sub2) = split_archive_path(&zip_path.join("docs")).unwrap();
+        assert_eq!(arch2, zip_path);
+        assert_eq!(sub2, PathBuf::from("docs"));
+
+        let (arch3, sub3) = split_archive_path(&zip_path.join("docs/guide.md")).unwrap();
+        assert_eq!(arch3, zip_path);
+        assert_eq!(sub3, PathBuf::from("docs/guide.md"));
+
+        // Test root entries via read_archive_directory_sync and read_directory_sync
+        let root_entries = read_archive_directory_sync(&zip_path, Path::new(""), false).unwrap();
+        assert_eq!(root_entries.len(), 2);
+        let names: Vec<String> = root_entries.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"file1.txt".to_string()));
+        assert!(names.contains(&"docs".to_string()));
+
+        // Ensure read_directory_sync directly resolves archive path both with and without trailing slash
+        let sync_entries = read_directory_sync(zip_path.to_string_lossy().to_string(), false).unwrap();
+        assert_eq!(sync_entries.len(), 2);
+        let sync_slash_entries = read_directory_sync(format!("{}/", zip_path.to_string_lossy()), false).unwrap();
+        assert_eq!(sync_slash_entries.len(), 2);
+
+        let docs_entry = root_entries.iter().find(|e| e.name == "docs").unwrap();
+        assert!(docs_entry.is_dir);
+        assert_eq!(docs_entry.child_count, Some(2)); // guide.md and deep
+
+        let file1_entry = root_entries.iter().find(|e| e.name == "file1.txt").unwrap();
+        assert!(!file1_entry.is_dir);
+        assert_eq!(file1_entry.size, 11);
+
+        // Test subfolder entries
+        let docs_entries = read_archive_directory_sync(&zip_path, Path::new("docs"), false).unwrap();
+        assert_eq!(docs_entries.len(), 2);
+        let docs_names: Vec<String> = docs_entries.iter().map(|e| e.name.clone()).collect();
+        assert!(docs_names.contains(&"guide.md".to_string()));
+        assert!(docs_names.contains(&"deep".to_string()));
+
+        // Test single file on-demand cache extraction
+        let extracted = extract_single_archive_entry_to_cache(&zip_path, Path::new("docs/guide.md")).unwrap();
+        assert!(extracted.exists());
+        let content = fs::read_to_string(&extracted).unwrap();
+        assert_eq!(content, "# Guide Content");
+
+        // Test search inside archive
+        let search_results = search_archive_sync(&zip_path, Path::new(""), "guide", false).unwrap();
+        assert_eq!(search_results.len(), 1);
+        assert_eq!(search_results[0].name, "guide.md");
+
+        // Test extracting/moving archive item to a normal destination directory
+        let out_dir = tmp_dir.join("dest_folder");
+        fs::create_dir_all(&out_dir).unwrap();
+        extract_archive_entry_or_dir(&zip_path, "docs/guide.md", &out_dir).unwrap();
+        assert!(out_dir.join("guide.md").exists());
+        assert_eq!(fs::read_to_string(out_dir.join("guide.md")).unwrap(), "# Guide Content");
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_tar_gz_virtual_browsing_and_preview() {
+        let tmp_dir = std::env::temp_dir().join("vfinder_test_tar");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let tar_path = tmp_dir.join("sample.tar.gz");
+
+        // Create a test TAR.GZ archive
+        {
+            let file = fs::File::create(&tar_path).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar_builder = tar::Builder::new(encoder);
+
+            let data1 = b"Hello from TAR.GZ";
+            let mut header1 = tar::Header::new_gnu();
+            header1.set_size(data1.len() as u64);
+            header1.set_mode(0o644);
+            header1.set_cksum();
+            tar_builder.append_data(&mut header1, "root_file.txt", &data1[..]).unwrap();
+
+            let data2 = b"<svg><circle/></svg>";
+            let mut header2 = tar::Header::new_gnu();
+            header2.set_size(data2.len() as u64);
+            header2.set_mode(0o644);
+            header2.set_cksum();
+            tar_builder.append_data(&mut header2, "assets/icon.svg", &data2[..]).unwrap();
+
+            tar_builder.finish().unwrap();
+        }
+
+        // Test root entries
+        let root_entries = read_archive_directory_sync(&tar_path, Path::new(""), false).unwrap();
+        assert_eq!(root_entries.len(), 2);
+        let names: Vec<String> = root_entries.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"root_file.txt".to_string()));
+        assert!(names.contains(&"assets".to_string()));
+
+        let assets_entry = root_entries.iter().find(|e| e.name == "assets").unwrap();
+        assert!(assets_entry.is_dir);
+
+        // Test subfolder entries
+        let assets_entries = read_archive_directory_sync(&tar_path, Path::new("assets"), false).unwrap();
+        assert_eq!(assets_entries.len(), 1);
+        assert_eq!(assets_entries[0].name, "icon.svg");
+        assert_eq!(assets_entries[0].kind, "SVG Vector Image");
+
+        // Test single file on-demand cache extraction
+        let extracted = extract_single_archive_entry_to_cache(&tar_path, Path::new("assets/icon.svg")).unwrap();
+        assert!(extracted.exists());
+        let content = fs::read_to_string(&extracted).unwrap();
+        assert_eq!(content, "<svg><circle/></svg>");
+
+        // Test extracting/moving archive item to a normal destination directory
+        let out_dir = tmp_dir.join("tar_dest_folder");
+        fs::create_dir_all(&out_dir).unwrap();
+        extract_archive_entry_or_dir(&tar_path, "assets/icon.svg", &out_dir).unwrap();
+        assert!(out_dir.join("icon.svg").exists());
+        assert_eq!(fs::read_to_string(out_dir.join("icon.svg")).unwrap(), "<svg><circle/></svg>");
+
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }
 
