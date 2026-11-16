@@ -506,9 +506,20 @@ fn setup_file_manager_dbus(app: tauri::AppHandle) {
             };
             let paths = uris
                 .iter()
-                .filter_map(|uri| gio::File::for_uri(uri).path())
+                .filter_map(|uri| {
+                    if uri.starts_with("file://") {
+                        gio::File::for_uri(uri).path()
+                    } else {
+                        Some(std::path::PathBuf::from(uri))
+                    }
+                })
                 .filter(|path| path.exists())
-                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| {
+                    path.canonicalize()
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .collect::<Vec<_>>();
 
             if !paths.is_empty() {
@@ -536,10 +547,6 @@ fn setup_file_manager_dbus(app: tauri::AppHandle) {
                 };
 
                 if !directory.is_empty() {
-                    if let Some(window) = app_for_methods.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
                     let request = serde_json::json!({
                         "directory": directory,
                         "selectedPaths": selected_paths,
@@ -554,6 +561,9 @@ fn setup_file_manager_dbus(app: tauri::AppHandle) {
                         false
                     };
                     if should_emit {
+                        if let Some(window) = app_for_methods.get_webview_window("main") {
+                            crate::download_server::activate_window_cross_desktop(&window);
+                        }
                         let _ = app_for_methods.emit_to("main", "file-manager-show-items", ());
                     }
                 }

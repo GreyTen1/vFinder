@@ -730,6 +730,7 @@ export const App: React.FC = () => {
   const pendingFileManagerRevealRef = useRef(pendingFileManagerReveal);
   pendingFileManagerRevealRef.current = pendingFileManagerReveal;
   const [pendingRevealScrollPath, setPendingRevealScrollPath] = useState<string | null>(null);
+  const [revealRequestSeq, setRevealRequestSeq] = useState(0);
 
   const isFavoritePath = useCallback(
     (p: string) => {
@@ -851,52 +852,79 @@ export const App: React.FC = () => {
   }, [showToast]);
 
   useEffect(() => {
-    Promise.all([
-      refreshSidebar(),
-      apiGetStartupDirectory(),
-      apiGetStartupSelection(),
-    ]).then(([data, startupDirectory, startupSelection]) => {
-      if (data?.needsSudoElevation) {
-        setSudoPrompt({
-          action: "elevate",
-          volumeName: "vFinder",
-          device: "root",
-          error: null,
-          busy: false,
-        });
-      }
-      if (data?.homeDir) {
+    Promise.all([apiGetStartupDirectory(), apiGetStartupSelection()]).then(
+      ([startupDirectory, startupSelection]) => {
         if (startupSelection && startupDirectory) {
           setPendingFileManagerReveal({
             directory: startupDirectory,
             selectedPaths: [startupSelection],
           });
+          setRevealRequestSeq((seq) => seq + 1);
         }
-        setTabs((prev) => {
-          if (
-            prev.length === 1 &&
-            (prev[0].path === "" ||
-              prev[0].path === "~" ||
-              prev[0].path === data.homeDir) &&
-            !prev[0].activeTag
-          ) {
-            const initialPath = startupDirectory || data.homeDir;
-            return [
-              {
-                id: prev[0].id || "tab-1",
-                title: startupDirectory ? folderDisplayName(startupDirectory) : "Home",
-                path: initialPath,
-                history: [initialPath],
-                historyIndex: 0,
-                activeTag: null,
-              },
-            ];
-          }
-          return prev;
-        });
+        if (startupDirectory) {
+          applyFavoriteViewModeIfPinned(startupDirectory);
+          setTabs((prev) => {
+            if (
+              prev.length === 1 &&
+              (prev[0].path === "" || prev[0].path === "~") &&
+              !prev[0].activeTag
+            ) {
+              return [
+                {
+                  id: prev[0].id || "tab-1",
+                  title: folderDisplayName(startupDirectory),
+                  path: startupDirectory,
+                  history: [startupDirectory],
+                  historyIndex: 0,
+                  activeTag: null,
+                },
+              ];
+            }
+            return prev;
+          });
+        }
       }
-    });
-  }, [refreshSidebar]);
+    );
+
+    Promise.all([refreshSidebar(), apiGetStartupDirectory()]).then(
+      ([data, startupDirectory]) => {
+        if (data?.needsSudoElevation) {
+          setSudoPrompt({
+            action: "elevate",
+            volumeName: "vFinder",
+            device: "root",
+            error: null,
+            busy: false,
+          });
+        }
+        if (data?.homeDir) {
+          setTabs((prev) => {
+            if (
+              prev.length === 1 &&
+              (prev[0].path === "" || prev[0].path === "~") &&
+              !prev[0].activeTag &&
+              !pendingFileManagerRevealRef.current
+            ) {
+              const initialPath = startupDirectory || data.homeDir;
+              return [
+                {
+                  id: prev[0].id || "tab-1",
+                  title: startupDirectory
+                    ? folderDisplayName(startupDirectory)
+                    : "Home",
+                  path: initialPath,
+                  history: [initialPath],
+                  historyIndex: 0,
+                  activeTag: null,
+                },
+              ];
+            }
+            return prev;
+          });
+        }
+      }
+    );
+  }, [refreshSidebar, applyFavoriteViewModeIfPinned]);
 
   // Pre-warm all favorite folders in the background once initial entries are ready
   useEffect(() => {
@@ -1160,12 +1188,13 @@ export const App: React.FC = () => {
   // Note: Do NOT use requestAnimationFrame here because WebKitGTK suspends rAF while the window is hidden!
   useEffect(() => {
     if (!entriesReady || windowShownRef.current) return;
+    if (pendingFileManagerRevealRef.current || pendingRevealScrollPath) return;
     windowShownRef.current = true;
     const timerId = window.setTimeout(() => {
       void apiShowMainWindow();
     }, 12);
     return () => clearTimeout(timerId);
-  }, [entriesReady]);
+  }, [entriesReady, pendingRevealScrollPath]);
 
   // Sorted entries (fast-paths default name+asc since backend already returns sorted entries)
   const sortedEntries = useMemo(() => {
@@ -1225,6 +1254,7 @@ export const App: React.FC = () => {
   }, []);
 
   useLayoutEffect(() => {
+    if (pendingFileManagerRevealRef.current || pendingRevealScrollPath) return;
     const element = document.querySelector<HTMLElement>(
       `[data-tab-scroll-view="${viewMode}"]`
     );
@@ -1233,14 +1263,14 @@ export const App: React.FC = () => {
     restoringTabScrollRef.current = true;
     element.scrollTop = position?.top ?? 0;
     element.scrollLeft = position?.left ?? 0;
-    const frame = requestAnimationFrame(() => {
+    const timerId = window.setTimeout(() => {
       restoringTabScrollRef.current = false;
-    });
+    }, 0);
     return () => {
-      cancelAnimationFrame(frame);
+      window.clearTimeout(timerId);
       restoringTabScrollRef.current = false;
     };
-  }, [activeTabId, viewMode, entries]);
+  }, [activeTabId, activeTab?.path, activeTab?.activeTag, viewMode]);
 
   const knownEntriesMapRef = useRef<Map<string, FileEntry>>(new Map());
   useEffect(() => {
@@ -1263,7 +1293,13 @@ export const App: React.FC = () => {
     if (activeTab && !activeTab.activeTag) {
       applyFavoriteViewModeIfPinned(activeTab.path);
     }
-  }, [activeTab?.id, activeTab?.path, activeTab?.activeTag, applyFavoriteViewModeIfPinned]);
+  }, [
+    activeTab?.id,
+    activeTab?.path,
+    activeTab?.activeTag,
+    sidebarData?.favorites,
+    applyFavoriteViewModeIfPinned,
+  ]);
 
   // Navigation handlers (synchronously swap cached entries in the same state batch!)
   const navigateTo = useCallback(
@@ -1328,6 +1364,7 @@ export const App: React.FC = () => {
         selectedPaths,
         showProperties: payload.showProperties,
       });
+      setRevealRequestSeq((seq) => seq + 1);
       if (activeTabRef.current?.path !== payload.directory) {
         navigateTo(payload.directory);
       } else {
@@ -1393,6 +1430,7 @@ export const App: React.FC = () => {
       setSelectedPaths(matchedPaths);
       lastSelectedPathRef.current = matchedPaths[0];
       setPendingRevealScrollPath(matchedPaths[0]);
+      setRevealRequestSeq((seq) => seq + 1);
     } else {
       setPendingFileManagerReveal(null);
       windowShownRef.current = true;
@@ -3650,6 +3688,14 @@ export const App: React.FC = () => {
     inline: ScrollLogicalPosition = "nearest",
     onCentered?: () => void
   ) => {
+    const recordScrollerPosition = (scroller: HTMLElement) => {
+      const mode = scroller.dataset.tabScrollView || viewMode;
+      tabScrollPositionsRef.current.set(`${activeTabIdRef.current}:${mode}`, {
+        top: scroller.scrollTop,
+        left: scroller.scrollLeft,
+      });
+    };
+
     const centerWithin = (container: HTMLElement, element: HTMLElement, axis: "x" | "y") => {
       const containerRect = container.getBoundingClientRect();
       const elementRect = element.getBoundingClientRect();
@@ -3662,6 +3708,7 @@ export const App: React.FC = () => {
         const elementCenter = elementRect.left + elementRect.width / 2;
         container.scrollLeft += elementCenter - viewportCenter;
       }
+      recordScrollerPosition(container);
     };
 
     const scheduleScroll = (attemptsRemaining: number, virtualPositionApplied: boolean) => {
@@ -3706,6 +3753,7 @@ export const App: React.FC = () => {
             }
           } else {
             el.scrollIntoView({ block, inline });
+            if (iconContainer) recordScrollerPosition(iconContainer);
             hasLayout = true;
           }
           if (onCentered && !hasLayout) {
@@ -3718,9 +3766,9 @@ export const App: React.FC = () => {
           return;
         }
 
-        if (!virtualPositionApplied && typeof index === "number" && index >= 0 && viewMode === "icons") {
-          if (iconContainer) {
-            const container = iconContainer;
+        if (!virtualPositionApplied && typeof index === "number" && index >= 0 && iconContainer) {
+          const container = iconContainer;
+          if (viewMode === "icons") {
             const cellWidth = Math.max(96, iconSize + 44);
             const contentWidth = Math.max(0, container.clientWidth - 40);
             const columns = Math.max(
@@ -3732,6 +3780,16 @@ export const App: React.FC = () => {
             container.scrollTop = block === "center"
               ? Math.max(0, targetTop - (container.clientHeight - rowPitch) / 2)
               : targetTop;
+            recordScrollerPosition(container);
+          } else if (viewMode === "list") {
+            const zoomScale = iconSize / 64;
+            const rowIconSize = Math.max(14, Math.min(36, Math.round(18 * zoomScale)));
+            const rowHeight = Math.max(24, rowIconSize + 10);
+            const targetTop = index * rowHeight;
+            container.scrollTop = block === "center"
+              ? Math.max(0, targetTop - (container.clientHeight - rowHeight) / 2)
+              : targetTop;
+            recordScrollerPosition(container);
           }
         }
       } catch {
@@ -3751,26 +3809,83 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!pendingRevealScrollPath) return;
     const index = sortedEntries.findIndex((entry) => entry.path === pendingRevealScrollPath);
+    if (index < 0) return;
+
+    let cancelled = false;
+    const timers: number[] = [];
+
+    const runCenterPass = () => {
+      if (cancelled) return;
+      scrollEntryIntoView(
+        pendingRevealScrollPath,
+        index,
+        "center",
+        "center"
+      );
+    };
+
+    // Center immediately before showing the window, then show/activate the window
+    // and re-center across several passes and any compositor resize (e.g. Hyprland tiling).
     scrollEntryIntoView(
       pendingRevealScrollPath,
-      index >= 0 ? index : undefined,
+      index,
       "center",
       "center",
       () => {
-        const current = pendingFileManagerRevealRef.current;
-        if (
-          !current?.selectedPaths.some((path) =>
-            path === pendingRevealScrollPath ||
-            path.split(/[\\/]/).pop() === pendingRevealScrollPath.split(/[\\/]/).pop()
-          )
-        ) return;
-        setPendingRevealScrollPath(null);
-        setPendingFileManagerReveal(null);
+        if (cancelled) return;
         windowShownRef.current = true;
         void apiShowMainWindow();
       }
     );
-  }, [pendingRevealScrollPath, sortedEntries, scrollEntryIntoView]);
+
+    const showTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      windowShownRef.current = true;
+      void apiShowMainWindow();
+      runCenterPass();
+    }, 16);
+    timers.push(showTimer);
+
+    for (const delay of [45, 95, 160, 240, 330]) {
+      timers.push(window.setTimeout(runCenterPass, delay));
+    }
+
+    const viewContainer = document.querySelector<HTMLElement>(
+      `[data-tab-scroll-view="${viewMode}"]`
+    );
+    let resizeObserver: ResizeObserver | null = null;
+    if (viewContainer) {
+      resizeObserver = new ResizeObserver(() => {
+        runCenterPass();
+      });
+      resizeObserver.observe(viewContainer);
+    }
+
+    const finishTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      runCenterPass();
+      const current = pendingFileManagerRevealRef.current;
+      if (
+        current &&
+        !current.selectedPaths.some(
+          (path) =>
+            path === pendingRevealScrollPath ||
+            path.split(/[\\/]/).pop() === pendingRevealScrollPath.split(/[\\/]/).pop()
+        )
+      ) {
+        return;
+      }
+      setPendingRevealScrollPath(null);
+      setPendingFileManagerReveal(null);
+    }, 380);
+    timers.push(finishTimer);
+
+    return () => {
+      cancelled = true;
+      timers.forEach((id) => window.clearTimeout(id));
+      resizeObserver?.disconnect();
+    };
+  }, [pendingRevealScrollPath, revealRequestSeq, sortedEntries, viewMode, scrollEntryIntoView]);
 
   useLayoutEffect(() => {
     if (!renamingPath) return;

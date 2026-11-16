@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
   ExternalLink,
@@ -628,6 +628,8 @@ export const IconView: React.FC<CommonViewProps> = ({
   const rowPitch = itemHeight + 20;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
+  const revealPathRef = useRef(revealPath);
+  revealPathRef.current = revealPath;
 
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const draggedSet = useMemo(() => new Set(draggedPaths), [draggedPaths]);
@@ -657,7 +659,7 @@ export const IconView: React.FC<CommonViewProps> = ({
     onClickEntryFallback: handleClickEntryByPath,
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     let throttleTimer: number | null = null;
@@ -687,6 +689,14 @@ export const IconView: React.FC<CommonViewProps> = ({
     };
 
     const scheduleUpdate = () => {
+      if (revealPathRef.current) {
+        if (throttleTimer !== null) {
+          window.clearTimeout(throttleTimer);
+          throttleTimer = null;
+        }
+        applySize();
+        return;
+      }
       const elapsed = performance.now() - lastMeasureTime;
       if (elapsed >= THROTTLE_MS) {
         if (throttleTimer !== null) {
@@ -714,18 +724,35 @@ export const IconView: React.FC<CommonViewProps> = ({
   }, [cellWidth, rowPitch]);
 
   const handleGridScroll = useCallback(() => {
+    const container = containerRef.current;
+    if (container && revealPathRef.current) {
+      const nextTop = container.scrollTop;
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      setGridViewport((current) =>
+        current.top === nextTop &&
+        current.width === width &&
+        current.height === height
+          ? current
+          : {
+              width: width > 0 ? width : current.width,
+              height: height > 0 ? height : current.height,
+              top: nextTop,
+            }
+      );
+    }
     if (gridScrollFrameRef.current !== null) return;
     // Keep icon virtualization responsive while the native window is hidden.
     // WebKitGTK can suspend requestAnimationFrame in that state, but file
     // manager reveal requests need scrolling to materialize their target first.
     gridScrollFrameRef.current = window.setTimeout(() => {
       gridScrollFrameRef.current = null;
-      const container = containerRef.current;
-      if (!container) return;
+      const el = containerRef.current;
+      if (!el) return;
       setGridViewport((current) =>
-        current.top === container.scrollTop
+        current.top === el.scrollTop
           ? current
-          : { ...current, top: container.scrollTop }
+          : { ...current, top: el.scrollTop }
       );
     }, 16);
   }, []);
@@ -742,7 +769,19 @@ export const IconView: React.FC<CommonViewProps> = ({
   // Keep grid virtualization active during reveals; revealEntryIndex below
   // mounts the revealed entry directly at its virtual grid coordinates.
   const isLargeGrid = entries.length > ICON_VIRTUALIZATION_THRESHOLD;
-  const contentWidth = Math.max(0, gridViewport.width - 40);
+  const effectiveWidth =
+    gridViewport.width > 0
+      ? gridViewport.width
+      : containerRef.current?.clientWidth || 0;
+  const effectiveHeight =
+    gridViewport.height > 0
+      ? gridViewport.height
+      : containerRef.current?.clientHeight || 0;
+  const effectiveTop =
+    gridViewport.width > 0
+      ? gridViewport.top
+      : containerRef.current?.scrollTop || 0;
+  const contentWidth = Math.max(0, effectiveWidth - 40);
   const rawColumnCount = Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)));
   const columnCount = isLargeGrid ? rawColumnCount : 1;
   const displayColumnCount = isLargeGrid
@@ -750,12 +789,12 @@ export const IconView: React.FC<CommonViewProps> = ({
     : Math.min(Math.max(1, entries.length), rawColumnCount);
   const rowCount = Math.ceil(entries.length / columnCount);
   const firstVisibleRow = isLargeGrid
-    ? Math.max(0, Math.floor((gridViewport.top - 20) / rowPitch) - 3)
+    ? Math.max(0, Math.floor((effectiveTop - 20) / rowPitch) - 3)
     : 0;
   const lastVisibleRow = isLargeGrid
     ? Math.min(
         rowCount,
-        Math.ceil((gridViewport.top + gridViewport.height - 20) / rowPitch) + 4
+        Math.ceil((effectiveTop + effectiveHeight - 20) / rowPitch) + 4
       )
     : rowCount;
   const firstVisibleIndex = firstVisibleRow * columnCount;
@@ -796,10 +835,15 @@ export const IconView: React.FC<CommonViewProps> = ({
           className="grid gap-y-5 gap-x-3 justify-start justify-items-center"
           style={{
             gridTemplateColumns:
-              gridViewport.width > 0
+              effectiveWidth > 0
                 ? `repeat(${displayColumnCount}, ${cellWidth}px)`
                 : `repeat(auto-fill, ${cellWidth}px)`,
-            ...(isLargeGrid ? { gridAutoRows: `${itemHeight}px` } : {}),
+            ...(isLargeGrid
+              ? {
+                  gridTemplateRows: `repeat(${Math.max(1, rowCount)}, ${itemHeight}px)`,
+                  gridAutoRows: `${itemHeight}px`,
+                }
+              : {}),
           }}
         >
           {renderedItems.map(({ entry, index }) => {
@@ -1096,6 +1140,7 @@ const ListViewRow = React.memo<ListViewRowProps>(
 
 export const ListView: React.FC<CommonViewProps> = ({
   entries,
+  revealPath,
   selectedPaths,
   onSelect,
   onSetSelection,
@@ -1312,7 +1357,7 @@ export const ListView: React.FC<CommonViewProps> = ({
     return list;
   }, [entries, expandedPaths, isLargeList, sortedDirCache]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isLargeList) return;
     const container = containerRef.current;
     if (!container) return;
@@ -1333,12 +1378,15 @@ export const ListView: React.FC<CommonViewProps> = ({
       headerRef.current.scrollLeft = container.scrollLeft;
     }
     if (!isLargeList) return;
+    if (revealPath) {
+      setScrollTop(container.scrollTop);
+    }
     if (scrollFrameRef.current !== null) return;
-    scrollFrameRef.current = requestAnimationFrame(() => {
+    scrollFrameRef.current = window.setTimeout(() => {
       scrollFrameRef.current = null;
       setScrollTop(containerRef.current?.scrollTop || 0);
-    });
-  }, [isLargeList]);
+    }, 16);
+  }, [isLargeList, revealPath]);
 
   const handleListWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
@@ -1366,7 +1414,7 @@ export const ListView: React.FC<CommonViewProps> = ({
   useEffect(
     () => () => {
       if (scrollFrameRef.current !== null) {
-        cancelAnimationFrame(scrollFrameRef.current);
+        window.clearTimeout(scrollFrameRef.current);
       }
     },
     []
@@ -1382,7 +1430,14 @@ export const ListView: React.FC<CommonViewProps> = ({
     Math.ceil((scrollTop + viewportHeight) / rowHeight) + overscan
   );
   const renderedRows = isLargeList
-    ? virtualRows.slice(firstVisibleRow, lastVisibleRow)
+    ? (() => {
+        const slice = virtualRows.slice(firstVisibleRow, lastVisibleRow);
+        if (revealPath && !slice.some((r) => r.entry?.path === revealPath)) {
+          const revealRow = virtualRows.find((r) => r.entry?.path === revealPath);
+          if (revealRow) slice.push(revealRow);
+        }
+        return slice;
+      })()
     : [];
 
   const visibleEntriesRef = useRef<FileEntry[]>(visibleEntries);
@@ -2022,7 +2077,7 @@ const ColumnPaneView = React.memo<{
 
   const isLargeColumn = displayEntries.length > COLUMN_VIRTUALIZATION_THRESHOLD;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isLargeColumn) return;
     const container = paneRef.current;
     if (!container) return;
@@ -2038,16 +2093,16 @@ const ColumnPaneView = React.memo<{
 
   const handlePaneScroll = useCallback(() => {
     if (!isLargeColumn || scrollFrameRef.current !== null) return;
-    scrollFrameRef.current = requestAnimationFrame(() => {
+    scrollFrameRef.current = window.setTimeout(() => {
       scrollFrameRef.current = null;
       setScrollTop(paneRef.current?.scrollTop || 0);
-    });
+    }, 16);
   }, [isLargeColumn]);
 
   useEffect(
     () => () => {
       if (scrollFrameRef.current !== null) {
-        cancelAnimationFrame(scrollFrameRef.current);
+        window.clearTimeout(scrollFrameRef.current);
       }
     },
     []
@@ -2063,9 +2118,23 @@ const ColumnPaneView = React.memo<{
         Math.ceil((scrollTop + viewportHeight) / rowHeight) + overscan
       )
     : displayEntries.length;
-  const visibleSlice = isLargeColumn
-    ? displayEntries.slice(firstVisibleRow, lastVisibleRow)
-    : displayEntries;
+  const visibleRows = isLargeColumn
+    ? (() => {
+        const rows = displayEntries
+          .slice(firstVisibleRow, lastVisibleRow)
+          .map((entry, idx) => ({ entry, rowIndex: firstVisibleRow + idx }));
+        for (let i = 0; i < displayEntries.length; i++) {
+          const item = displayEntries[i];
+          if (
+            (selectedSet.has(item.path) || col.selectedEntry?.path === item.path) &&
+            (i < firstVisibleRow || i >= lastVisibleRow)
+          ) {
+            rows.push({ entry: item, rowIndex: i });
+          }
+        }
+        return rows;
+      })()
+    : [];
 
   return (
     <div
@@ -2096,8 +2165,7 @@ const ColumnPaneView = React.memo<{
           className="relative w-full"
           style={{ height: displayEntries.length * rowHeight }}
         >
-          {visibleSlice.map((entry, idx) => {
-            const rowIndex = firstVisibleRow + idx;
+          {visibleRows.map(({ entry, rowIndex }) => {
             const isRenamingRow = renamingPath === entry.path;
             return (
               <div
