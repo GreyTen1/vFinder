@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   ExternalLink,
   FolderPlus,
@@ -73,7 +74,14 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
   useToolbarOutsideDismiss(dialogRef, Boolean(entry), onClose);
 
   useLayoutEffect(() => {
-    if (!entry) return;
+    if (!entry) {
+      setLoading(false);
+      setPreview(null);
+      setVideoError(null);
+      setVideoErrorCopied(false);
+      setVideoUrl(null);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setPreview(null);
@@ -95,8 +103,18 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
     };
   }, [entry?.path]);
 
+  const activePreview = entry && preview?.path === entry.path ? preview : null;
+
   useEffect(() => {
-    if (!entry || (preview?.previewType !== "video" && preview?.previewType !== "pdf")) return;
+    if (
+      !entry ||
+      !activePreview ||
+      (activePreview.previewType !== "video" &&
+        activePreview.previewType !== "pdf" &&
+        !(activePreview.previewType === "image" && !activePreview.dataUrl))
+    ) {
+      return;
+    }
     let cancelled = false;
     apiGetFilePreviewUrl(entry.path)
       .then((url) => {
@@ -108,9 +126,24 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [entry?.path, preview?.previewType]);
+  }, [entry?.path, activePreview?.path, activePreview?.previewType, activePreview?.dataUrl]);
 
   if (!entry) return null;
+
+  const imagePreviewSrc =
+    activePreview?.previewType === "image"
+      ? activePreview.dataUrl ||
+        videoUrl ||
+        (videoError
+          ? (() => {
+              try {
+                return convertFileSrc(entry.path);
+              } catch {
+                return null;
+              }
+            })()
+          : null)
+      : null;
 
   return (
     <div
@@ -169,13 +202,19 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
         <div className="flex-1 overflow-auto p-6 flex items-center justify-center">
           {loading ? (
             <div className="text-xs opacity-50">Loading Quick Look preview...</div>
-          ) : preview?.previewType === "image" && preview.dataUrl ? (
-            <img
-              src={preview.dataUrl}
-              alt={entry.name}
-              className="max-h-full max-w-full object-contain rounded-lg shadow-lg"
-            />
-          ) : preview?.previewType === "pdf" ? (
+          ) : activePreview?.previewType === "image" ? (
+            imagePreviewSrc ? (
+              <img
+                src={imagePreviewSrc}
+                alt={entry.name}
+                className="max-h-full max-w-full object-contain rounded-lg shadow-lg"
+              />
+            ) : (
+              <div className="text-xs opacity-50">
+                {videoError || "Preparing image preview..."}
+              </div>
+            )
+          ) : activePreview?.previewType === "pdf" ? (
             videoUrl ? (
               <iframe
                 key={entry.path}
@@ -186,7 +225,7 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
             ) : (
               <div className="text-xs opacity-50">{videoError || "Preparing PDF preview..."}</div>
             )
-          ) : preview?.previewType === "video" ? (
+          ) : activePreview?.previewType === "video" ? (
             <div className="flex max-h-full max-w-full flex-col items-center gap-2">
               {!videoUrl && videoError === null && (
                 <div className="text-xs opacity-50">Preparing video preview...</div>
@@ -212,8 +251,8 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
                   const safeSource = source.replace(/([?&]token=)[^&]*/, "$1[redacted]");
                   setVideoError(
                     `Error ${code} (${codeName})${error?.message ? `: ${error.message}` : ""}. ` +
-                      `MIME: ${preview.mimeType || "unknown"}; ` +
-                      `canPlayType: ${video.canPlayType(preview.mimeType || "") || "no"}; ` +
+                      `MIME: ${activePreview.mimeType || "unknown"}; ` +
+                      `canPlayType: ${video.canPlayType(activePreview.mimeType || "") || "no"}; ` +
                       `networkState: ${video.networkState}; readyState: ${video.readyState}; ` +
                       `source: ${safeSource}`,
                   );
@@ -223,7 +262,7 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
               >
                 <source
                   src={videoUrl}
-                  type={preview.mimeType || undefined}
+                  type={activePreview.mimeType || undefined}
                 />
               </video>
               )}
@@ -262,7 +301,7 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
                 </div>
               )}
             </div>
-          ) : preview?.previewType === "text" && preview.textContent !== undefined ? (
+          ) : activePreview?.previewType === "text" && activePreview.textContent !== undefined ? (
             <div
               className={`w-full h-full rounded-xl border overflow-auto p-4 font-mono text-xs leading-relaxed ${
                 darkMode
@@ -271,9 +310,9 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
               }`}
             >
               <pre className="whitespace-pre-wrap break-words">
-                {preview.textContent || "(Empty text file)"}
+                {activePreview.textContent || "(Empty text file)"}
               </pre>
-              {preview.truncated && (
+              {activePreview.truncated && (
                 <div className="mt-4 pt-2 border-t border-current/10 text-[11px] opacity-50">
                   Preview truncated at 64 KB — open file to view full contents.
                 </div>
@@ -287,7 +326,7 @@ export const QuickLookModal: React.FC<QuickLookModalProps> = ({
               <p className="text-xs opacity-50">
                 {entry.isDir
                   ? (() => {
-                      const count = preview?.childCount ?? entry.childCount ?? 0;
+                      const count = activePreview?.childCount ?? entry.childCount ?? 0;
                       return `${count} ${count === 1 ? "item" : "items"}`;
                     })()
                   : formatBytes(entry.size)}

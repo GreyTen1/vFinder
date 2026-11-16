@@ -10,15 +10,27 @@ use std::io::{Read, Seek, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 static TAGS_CACHE: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
 static OPEN_WITH_CACHE: OnceLock<Mutex<OpenWithConfig>> = OnceLock::new();
+static TAGS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static OPEN_WITH_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static META_CONFIG_VERSION: AtomicU64 = AtomicU64::new(1);
 static DETACHED_WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
+static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
+static SEARCH_GENERATION: AtomicU64 = AtomicU64::new(0);
+static THUMBNAIL_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static THUMBNAIL_DECODE_SLOTS: [Mutex<()>; 4] = [
+    Mutex::new(()),
+    Mutex::new(()),
+    Mutex::new(()),
+    Mutex::new(()),
+];
+static THUMBNAIL_DECODE_NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
 
 fn encode_query_value(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
@@ -147,42 +159,49 @@ struct LsblkDevice {
     children: Vec<LsblkDevice>,
 }
 
+static SYSTEM_OS_NAME: OnceLock<String> = OnceLock::new();
+
 pub fn get_system_os_name() -> String {
-    for path in ["/etc/os-release", "/usr/lib/os-release"] {
-        if let Ok(content) = fs::read_to_string(path) {
-            let mut name_fallback = None;
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("PRETTY_NAME=") {
-                    let val = trimmed
-                        .trim_start_matches("PRETTY_NAME=")
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .trim();
-                    if !val.is_empty() {
-                        return val.to_string();
+    SYSTEM_OS_NAME
+        .get_or_init(|| {
+            for path in ["/etc/os-release", "/usr/lib/os-release"] {
+                if let Ok(content) = fs::read_to_string(path) {
+                    let mut name_fallback = None;
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("PRETTY_NAME=") {
+                            let val = trimmed
+                                .trim_start_matches("PRETTY_NAME=")
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                .trim();
+                            if !val.is_empty() {
+                                return val.to_string();
+                            }
+                        } else if trimmed.starts_with("NAME=") && name_fallback.is_none() {
+                            let val = trimmed
+                                .trim_start_matches("NAME=")
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                .trim();
+                            if !val.is_empty() {
+                                name_fallback = Some(val.to_string());
+                            }
+                        }
                     }
-                } else if trimmed.starts_with("NAME=") && name_fallback.is_none() {
-                    let val = trimmed
-                        .trim_start_matches("NAME=")
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .trim();
-                    if !val.is_empty() {
-                        name_fallback = Some(val.to_string());
+                    if let Some(name) = name_fallback {
+                        return name;
                     }
                 }
             }
-            if let Some(name) = name_fallback {
-                return name;
-            }
-        }
-    }
-    "Linux".to_string()
+            "Linux".to_string()
+        })
+        .clone()
 }
 
 fn collect_lsblk_partitions(
     devices: &[LsblkDevice],
+    proc_mounts: &str,
     parent_is_removable: bool,
     parent_vendor: Option<&str>,
     parent_model: Option<&str>,
@@ -201,6 +220,7 @@ fn collect_lsblk_partitions(
         if !dev.children.is_empty() {
             collect_lsblk_partitions(
                 &dev.children,
+                proc_mounts,
                 this_removable,
                 this_vendor,
                 this_model,
@@ -253,15 +273,13 @@ fn collect_lsblk_partitions(
 
         // Fallback: check /proc/mounts (for FUSE / exfat-fuse / udisks mounts that lsblk might omit)
         if mount_point.is_empty() {
-            if let Ok(proc_mounts) = fs::read_to_string("/proc/mounts") {
-                for line in proc_mounts.lines() {
-                    let mut parts = line.split_whitespace();
-                    let src = parts.next().unwrap_or("");
-                    let dst = parts.next().unwrap_or("");
-                    if src == device_path && !dst.is_empty() {
-                        mount_point = dst.replace("\\040", " ");
-                        break;
-                    }
+            for line in proc_mounts.lines() {
+                let mut parts = line.split_whitespace();
+                let src = parts.next().unwrap_or("");
+                let dst = parts.next().unwrap_or("");
+                if src == device_path && !dst.is_empty() {
+                    mount_point = dst.replace("\\040", " ");
+                    break;
                 }
             }
         }
@@ -402,7 +420,7 @@ pub fn list_system_partitions() -> Vec<VolumeInfo> {
     let mut volumes = Vec::new();
     if let Ok(out) = output {
         if let Ok(parsed) = serde_json::from_slice::<LsblkOutput>(&out.stdout) {
-            collect_lsblk_partitions(&parsed.blockdevices, false, None, None, &mut volumes);
+            collect_lsblk_partitions(&parsed.blockdevices, &mounts_sig, false, None, None, &mut volumes);
         }
     }
 
@@ -496,7 +514,7 @@ fn run_sudo_command(password: &str, args: &[&str]) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
 
-    if is_root_session() {
+    if crate::is_effective_root() {
         if args.is_empty() || args[0].starts_with('-') {
             return Ok(());
         }
@@ -940,11 +958,51 @@ pub async fn format_partition(
     tauri::async_runtime::spawn_blocking(move || {
         // Critical safety check: NEVER allow formatting root or boot
         let partitions = list_system_partitions();
-        let target_vol = partitions.iter().find(|v| v.device == device).cloned();
+        let canonical_device = fs::canonicalize(&device)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let matches_device = |vol: &VolumeInfo| -> bool {
+            if vol.device == device {
+                return true;
+            }
+            if let Some(ref canon_dev) = canonical_device {
+                if vol.device == *canon_dev {
+                    return true;
+                }
+                if let Ok(canon_vol) = fs::canonicalize(&vol.device) {
+                    if canon_vol.to_string_lossy().as_ref() == canon_dev.as_str() {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
 
-        if let Some(ref v) = target_vol {
-            if v.mount_point == "/" || v.mount_point.starts_with("/boot") {
+        for vol in partitions.iter().filter(|v| matches_device(v)) {
+            if vol.mount_point == "/" || vol.mount_point.starts_with("/boot") {
                 return Err("Safety Protection: Cannot format root (/) or boot partition.".to_string());
+            }
+        }
+        if let Ok(proc_mounts) = fs::read_to_string("/proc/mounts") {
+            for line in proc_mounts.lines() {
+                let mut parts = line.split_whitespace();
+                let src = parts.next().unwrap_or("");
+                let dst = parts.next().unwrap_or("").replace("\\040", " ");
+                let src_matches = src == device
+                    || canonical_device
+                        .as_deref()
+                        .map(|c| {
+                            c == src
+                                || fs::canonicalize(src)
+                                    .ok()
+                                    .map(|p| p.to_string_lossy().into_owned())
+                                    .as_deref()
+                                    == Some(c)
+                        })
+                        .unwrap_or(false);
+                if src_matches && (dst == "/" || dst.starts_with("/boot")) {
+                    return Err("Safety Protection: Cannot format root (/) or boot partition.".to_string());
+                }
             }
         }
 
@@ -1158,6 +1216,36 @@ pub async fn check_partition(
     .map_err(|e| e.to_string())?
 }
 
+fn atomic_write_string(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Invalid configuration file path".to_string())?;
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config");
+    let seq = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!(".{file_name}.{}.{seq}.tmp", std::process::id()));
+    let write_res = (|| -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+    if write_res.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_res.map_err(|e| e.to_string())
+}
+
 fn get_tags_file_path() -> PathBuf {
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     config_dir.join("finder-tags.json")
@@ -1176,15 +1264,20 @@ pub fn load_tags_map() -> HashMap<String, Vec<String>> {
 }
 
 pub fn save_tags_map(map: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    let path = get_tags_file_path();
+    let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
+    let _write_guard = TAGS_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Tags write lock poisoned".to_string())?;
+    atomic_write_string(&path, &json)?;
     if let Some(mutex) = TAGS_CACHE.get() {
         if let Ok(mut guard) = mutex.lock() {
             *guard = map.clone();
         }
     }
     bump_cache_version();
-    let path = get_tags_file_path();
-    let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn get_open_with_file_path() -> PathBuf {
@@ -1205,15 +1298,20 @@ pub fn load_open_with_config() -> OpenWithConfig {
 }
 
 pub fn save_open_with_config(cfg: &OpenWithConfig) -> Result<(), String> {
+    let path = get_open_with_file_path();
+    let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    let _write_guard = OPEN_WITH_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Open-with write lock poisoned".to_string())?;
+    atomic_write_string(&path, &json)?;
     if let Some(mutex) = OPEN_WITH_CACHE.get() {
         if let Ok(mut guard) = mutex.lock() {
             *guard = cfg.clone();
         }
     }
     bump_cache_version();
-    let path = get_open_with_file_path();
-    let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    Ok(())
 }
 
 pub fn resolve_default_app(path_str: &str, ext: &str, cfg: &OpenWithConfig) -> Option<String> {
@@ -1743,17 +1841,17 @@ pub fn split_archive_path(path: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 fn normalize_entry_path(raw: &str) -> String {
-    let mut s = raw.replace('\\', "/");
-    while s.starts_with("./") {
-        s = s[2..].to_string();
+    let replaced = raw.replace('\\', "/");
+    let trailing_slash = replaced.ends_with('/');
+    let mut joined = replaced
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .collect::<Vec<_>>()
+        .join("/");
+    if trailing_slash && !joined.is_empty() {
+        joined.push('/');
     }
-    while s.starts_with('/') {
-        s = s[1..].to_string();
-    }
-    while s.contains("//") {
-        s = s.replace("//", "/");
-    }
-    s
+    joined
 }
 
 fn zip_datetime_to_unix(dt: Option<zip::DateTime>, fallback: i64) -> i64 {
@@ -1777,16 +1875,105 @@ pub struct ArchiveEntryInfo {
     pub mode: u32,
 }
 
-static ARCHIVE_ENTRIES_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u128), Arc<Vec<ArchiveEntryInfo>>>>> =
+#[derive(Clone, Debug)]
+struct ArchiveChildSummary {
+    is_dir: bool,
+    is_symlink: bool,
+    size: u64,
+    modified: i64,
+    mode: u32,
+}
+
+struct ArchiveIndex {
+    entries: Vec<ArchiveEntryInfo>,
+    children_by_parent: HashMap<String, HashMap<String, ArchiveChildSummary>>,
+}
+
+const MAX_ARCHIVE_CACHE_ENTRIES: usize = 16;
+
+struct CachedArchiveEntries {
+    last_accessed: Instant,
+    index: Arc<ArchiveIndex>,
+}
+
+static ARCHIVE_ENTRIES_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u128), CachedArchiveEntries>>> =
     OnceLock::new();
 
-fn get_archive_entries(archive_path: &Path) -> Result<Arc<Vec<ArchiveEntryInfo>>, String> {
+fn index_archive_entry(
+    children_by_parent: &mut HashMap<String, HashMap<String, ArchiveChildSummary>>,
+    entry: &ArchiveEntryInfo,
+) {
+    let rel = entry.relative_path.as_str();
+    if rel.is_empty() {
+        return;
+    }
+
+    let mut start = 0usize;
+    for (slash_idx, _) in rel.match_indices('/') {
+        let comp = &rel[start..slash_idx];
+        if !comp.is_empty() {
+            let parent = &rel[..start.saturating_sub(1)];
+            let siblings = children_by_parent
+                .entry(parent.to_string())
+                .or_default();
+            let existing = siblings
+                .entry(comp.to_string())
+                .or_insert_with(|| ArchiveChildSummary {
+                    is_dir: true,
+                    is_symlink: false,
+                    size: 0,
+                    modified: entry.modified,
+                    mode: 0o755,
+                });
+            existing.is_dir = true;
+            existing.size = 0;
+            existing.is_symlink = false;
+            if entry.modified > existing.modified {
+                existing.modified = entry.modified;
+            }
+        }
+        start = slash_idx + 1;
+    }
+
+    let leaf = &rel[start..];
+    if !leaf.is_empty() {
+        let parent = &rel[..start.saturating_sub(1)];
+        let siblings = children_by_parent
+            .entry(parent.to_string())
+            .or_default();
+        let existing = siblings
+            .entry(leaf.to_string())
+            .or_insert_with(|| ArchiveChildSummary {
+                is_dir: entry.is_dir,
+                is_symlink: entry.is_symlink,
+                size: entry.size,
+                modified: entry.modified,
+                mode: entry.mode,
+            });
+        if entry.is_dir {
+            existing.is_dir = true;
+            existing.size = 0;
+            existing.is_symlink = false;
+            existing.mode = entry.mode;
+        } else if !existing.is_dir {
+            existing.size = entry.size;
+            existing.is_symlink = entry.is_symlink;
+            existing.mode = entry.mode;
+        }
+        if entry.modified > existing.modified {
+            existing.modified = entry.modified;
+        }
+    }
+}
+
+fn get_archive_entries(archive_path: &Path) -> Result<Arc<ArchiveIndex>, String> {
     let mtime = path_mtime_ns(archive_path);
     let cache_mutex = ARCHIVE_ENTRIES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if mtime > 0 {
-        if let Ok(guard) = cache_mutex.lock() {
-            if let Some(cached) = guard.get(&(archive_path.to_path_buf(), mtime)) {
-                return Ok(Arc::clone(cached));
+        if let Ok(mut guard) = cache_mutex.lock() {
+            if let Some(cached) = guard.get_mut(&(archive_path.to_path_buf(), mtime)) {
+                cached.last_accessed = Instant::now();
+                return Ok(Arc::clone(&cached.index));
             }
         }
     }
@@ -1882,10 +2069,39 @@ fn get_archive_entries(archive_path: &Path) -> Result<Arc<Vec<ArchiveEntryInfo>>
         }
     }
 
-    let arc = Arc::new(entries);
+    let mut children_by_parent: HashMap<String, HashMap<String, ArchiveChildSummary>> =
+        HashMap::new();
+    for entry in &entries {
+        index_archive_entry(&mut children_by_parent, entry);
+    }
+
+    let arc = Arc::new(ArchiveIndex {
+        entries,
+        children_by_parent,
+    });
     if mtime > 0 {
         if let Ok(mut guard) = cache_mutex.lock() {
-            guard.insert((archive_path.to_path_buf(), mtime), Arc::clone(&arc));
+            let key = (archive_path.to_path_buf(), mtime);
+            if !guard.contains_key(&key) {
+                while guard.len() >= MAX_ARCHIVE_CACHE_ENTRIES {
+                    if let Some(oldest_key) = guard
+                        .iter()
+                        .min_by_key(|(_, v)| v.last_accessed)
+                        .map(|(k, _)| k.clone())
+                    {
+                        guard.remove(&oldest_key);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            guard.insert(
+                key,
+                CachedArchiveEntries {
+                    last_accessed: Instant::now(),
+                    index: Arc::clone(&arc),
+                },
+            );
         }
     }
     Ok(arc)
@@ -1896,126 +2112,33 @@ fn read_archive_directory_sync(
     subpath: &Path,
     show_hidden: bool,
 ) -> Result<Vec<FileEntry>, String> {
-    let all_entries = get_archive_entries(archive_path)?;
+    let index = get_archive_entries(archive_path)?;
     let target_str = normalize_entry_path(&subpath.to_string_lossy());
     let target_norm = target_str.trim_matches('/').to_string();
 
-    struct ChildCollector {
-        is_dir: bool,
-        is_symlink: bool,
-        size: u64,
-        modified: i64,
-        mode: u32,
-    }
-
-    let mut direct_children: HashMap<String, ChildCollector> = HashMap::new();
-
-    for entry in all_entries.iter() {
-        let rel = entry.relative_path.as_str();
-
-        if target_norm.is_empty() {
-            if let Some((first_comp, _)) = rel.split_once('/') {
-                let existing = direct_children
-                    .entry(first_comp.to_string())
-                    .or_insert_with(|| ChildCollector {
-                        is_dir: true,
-                        is_symlink: false,
-                        size: 0,
-                        modified: entry.modified,
-                        mode: 0o755,
-                    });
-                existing.is_dir = true;
-                if entry.modified > existing.modified {
-                    existing.modified = entry.modified;
-                }
-            } else {
-                let existing = direct_children
-                    .entry(rel.to_string())
-                    .or_insert_with(|| ChildCollector {
-                        is_dir: entry.is_dir,
-                        is_symlink: entry.is_symlink,
-                        size: entry.size,
-                        modified: entry.modified,
-                        mode: entry.mode,
-                    });
-                if entry.is_dir {
-                    existing.is_dir = true;
-                } else if !existing.is_dir {
-                    existing.size = entry.size;
-                    existing.is_symlink = entry.is_symlink;
-                    existing.mode = entry.mode;
-                }
-                if entry.modified > existing.modified {
-                    existing.modified = entry.modified;
-                }
-            }
-        } else {
-            let prefix = format!("{target_norm}/");
-            if let Some(rest) = rel.strip_prefix(&prefix) {
-                if rest.is_empty() {
-                    continue;
-                }
-                if let Some((first_comp, _)) = rest.split_once('/') {
-                    let existing = direct_children
-                        .entry(first_comp.to_string())
-                        .or_insert_with(|| ChildCollector {
-                            is_dir: true,
-                            is_symlink: false,
-                            size: 0,
-                            modified: entry.modified,
-                            mode: 0o755,
-                        });
-                    existing.is_dir = true;
-                    if entry.modified > existing.modified {
-                        existing.modified = entry.modified;
-                    }
-                } else {
-                    let existing = direct_children
-                        .entry(rest.to_string())
-                        .or_insert_with(|| ChildCollector {
-                            is_dir: entry.is_dir,
-                            is_symlink: entry.is_symlink,
-                            size: entry.size,
-                            modified: entry.modified,
-                            mode: entry.mode,
-                        });
-                    if entry.is_dir {
-                        existing.is_dir = true;
-                    } else if !existing.is_dir {
-                        existing.size = entry.size;
-                        existing.is_symlink = entry.is_symlink;
-                        existing.mode = entry.mode;
-                    }
-                    if entry.modified > existing.modified {
-                        existing.modified = entry.modified;
-                    }
-                }
-            }
-        }
-    }
+    let Some(direct_children) = index.children_by_parent.get(&target_norm) else {
+        return Ok(Vec::new());
+    };
 
     let mut result = Vec::with_capacity(direct_children.len());
+    let archive_path_str = archive_path.to_string_lossy();
 
     for (child_name, child) in direct_children {
         if !show_hidden && child_name.starts_with('.') {
             continue;
         }
 
-        let child_virtual_path = if target_norm.is_empty() {
-            format!("{}/{}", archive_path.to_string_lossy(), child_name)
+        let dir_key = if target_norm.is_empty() {
+            child_name.clone()
         } else {
-            format!(
-                "{}/{}/{}",
-                archive_path.to_string_lossy(),
-                target_norm,
-                child_name
-            )
+            format!("{target_norm}/{child_name}")
         };
+        let child_virtual_path = format!("{archive_path_str}/{dir_key}");
 
         let extension = if child.is_dir {
             String::new()
         } else {
-            Path::new(&child_name)
+            Path::new(child_name)
                 .extension()
                 .map(|e| e.to_string_lossy().to_lowercase())
                 .unwrap_or_default()
@@ -2028,7 +2151,7 @@ fn read_archive_directory_sync(
             if !fast.is_empty() {
                 fast.to_string()
             } else {
-                mime_guess::from_path(&child_name)
+                mime_guess::from_path(child_name)
                     .first_or_octet_stream()
                     .to_string()
             }
@@ -2038,33 +2161,23 @@ fn read_archive_directory_sync(
         let permissions = format_unix_permissions(child.mode, child.is_dir);
 
         let child_count = if child.is_dir {
-            let dir_prefix = if target_norm.is_empty() {
-                format!("{child_name}/")
-            } else {
-                format!("{target_norm}/{child_name}/")
-            };
-            let mut immediate_sub = std::collections::HashSet::new();
-            for entry in all_entries.iter() {
-                if let Some(sub_rest) = entry.relative_path.strip_prefix(&dir_prefix) {
-                    if !sub_rest.is_empty() {
-                        let sub_comp = sub_rest.split('/').next().unwrap_or("");
-                        if !sub_comp.is_empty() {
-                            immediate_sub.insert(sub_comp.to_string());
-                        }
-                    }
-                }
-            }
-            Some(immediate_sub.len())
+            Some(
+                index
+                    .children_by_parent
+                    .get(&dir_key)
+                    .map(|m| m.len())
+                    .unwrap_or(0),
+            )
         } else {
             None
         };
 
         result.push(FileEntry {
-            name: child_name,
+            name: child_name.clone(),
             path: child_virtual_path,
             is_dir: child.is_dir,
             is_symlink: child.is_symlink,
-            is_hidden: false,
+            is_hidden: child_name.starts_with('.'),
             size: child.size,
             modified: child.modified,
             created: child.modified,
@@ -2085,20 +2198,36 @@ fn read_archive_directory_sync(
     Ok(result)
 }
 
+#[cfg(test)]
 fn search_archive_sync(
     archive_path: &Path,
     subpath: &Path,
     query: &str,
     show_hidden: bool,
 ) -> Result<Vec<FileEntry>, String> {
-    let all_entries = get_archive_entries(archive_path)?;
+    search_archive_with_gen(archive_path, subpath, query, show_hidden, None)
+}
+
+fn search_archive_with_gen(
+    archive_path: &Path,
+    subpath: &Path,
+    query: &str,
+    show_hidden: bool,
+    expected_gen: Option<u64>,
+) -> Result<Vec<FileEntry>, String> {
+    let index = get_archive_entries(archive_path)?;
     let target_str = normalize_entry_path(&subpath.to_string_lossy());
     let target_norm = target_str.trim_matches('/').to_string();
     let q = query.to_lowercase();
 
     let mut result = Vec::new();
 
-    for entry in all_entries.iter() {
+    for entry in index.entries.iter() {
+        if let Some(expected) = expected_gen {
+            if SEARCH_GENERATION.load(Ordering::Relaxed) != expected {
+                return Ok(Vec::new());
+            }
+        }
         let rel = entry.relative_path.as_str();
 
         if !target_norm.is_empty() {
@@ -2183,9 +2312,29 @@ fn extract_single_archive_entry_to_cache(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let cache_dir = std::env::temp_dir()
-        .join("vfinder_archive_cache")
-        .join(format!("{hash_str}_{mtime}"));
+    let archive_cache_root = std::env::temp_dir().join("vfinder_archive_cache");
+    let cache_dir = archive_cache_root.join(format!("{hash_str}_{mtime}"));
+
+    if let Ok(entries) = fs::read_dir(&archive_cache_root) {
+        let max_age = std::time::Duration::from_secs(2 * 60 * 60);
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path == cache_dir {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if modified.elapsed().map(|age| age > max_age).unwrap_or(false) {
+                        if meta.is_dir() {
+                            let _ = fs::remove_dir_all(&entry_path);
+                        } else {
+                            let _ = fs::remove_file(&entry_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let dest_path = cache_dir.join(clean_subpath);
 
@@ -2259,18 +2408,46 @@ fn extract_single_archive_entry_to_cache(
     Ok(dest_path)
 }
 
-fn extract_archive_entry_or_dir(
+fn extract_archive_entries_batch(
     archive_path: &Path,
-    clean_item: &str,
+    clean_items: &[String],
     target_dir: &Path,
 ) -> Result<(), String> {
+    let item_specs: Vec<(String, String, String)> = clean_items
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|clean_item| {
+            let prefix_match = format!("{clean_item}/");
+            let base_name = clean_item
+                .rsplit('/')
+                .next()
+                .unwrap_or(clean_item)
+                .to_string();
+            (clean_item.clone(), prefix_match, base_name)
+        })
+        .collect();
+
+    if item_specs.is_empty() {
+        return Ok(());
+    }
+
     let archive_name = archive_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_lowercase();
 
-    let prefix_match = format!("{clean_item}/");
+    let match_rel_sub = |clean_enclosed: &str| -> Option<PathBuf> {
+        for (clean_item, prefix_match, base_name) in &item_specs {
+            if clean_enclosed == clean_item {
+                return Some(PathBuf::from(base_name));
+            }
+            if let Some(sub) = clean_enclosed.strip_prefix(prefix_match) {
+                return Some(PathBuf::from(base_name).join(sub));
+            }
+        }
+        None
+    };
 
     if archive_name.ends_with(".zip") {
         let file = fs::File::open(archive_path)
@@ -2282,26 +2459,22 @@ fn extract_archive_entry_or_dir(
             let mut entry = archive
                 .by_index(i)
                 .map_err(|e| format!("Could not read ZIP entry: {e}"))?;
+            let is_symlink = entry
+                .unix_mode()
+                .map(|mode| mode & 0o170000 == 0o120000)
+                .unwrap_or(false);
+            if is_symlink {
+                continue;
+            }
             let enclosed = match entry.enclosed_name() {
                 Some(name) => name.to_path_buf(),
                 None => continue,
             };
             let norm_enclosed = normalize_entry_path(&enclosed.to_string_lossy());
-            let clean_enclosed = norm_enclosed.trim_matches('/').to_string();
+            let clean_enclosed = norm_enclosed.trim_matches('/');
 
-            let is_match =
-                clean_enclosed == clean_item || clean_enclosed.starts_with(&prefix_match);
-            if !is_match {
+            let Some(rel_sub) = match_rel_sub(clean_enclosed) else {
                 continue;
-            }
-
-            let rel_sub = if clean_enclosed == clean_item {
-                PathBuf::from(clean_item.rsplit('/').next().unwrap_or(clean_item))
-            } else if let Some(sub) = clean_enclosed.strip_prefix(&prefix_match) {
-                let base_name = clean_item.rsplit('/').next().unwrap_or(clean_item);
-                PathBuf::from(base_name).join(sub)
-            } else {
-                PathBuf::from(clean_enclosed)
             };
 
             let dest = target_dir.join(rel_sub);
@@ -2329,30 +2502,30 @@ fn extract_archive_entry_or_dir(
 
         for entry_res in entries {
             let mut entry = entry_res.map_err(|e| format!("Could not read TAR entry: {e}"))?;
+            let entry_type = entry.header().entry_type();
+            if !entry_type.is_file() && !entry_type.is_dir() {
+                continue;
+            }
             let raw_path = entry
                 .path()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let norm = normalize_entry_path(&raw_path);
-            let clean_enclosed = norm.trim_matches('/').to_string();
-
-            let is_match =
-                clean_enclosed == clean_item || clean_enclosed.starts_with(&prefix_match);
-            if !is_match {
+            if raw_path
+                .replace('\\', "/")
+                .split('/')
+                .any(|seg| seg == "..")
+            {
                 continue;
             }
+            let norm = normalize_entry_path(&raw_path);
+            let clean_enclosed = norm.trim_matches('/');
 
-            let rel_sub = if clean_enclosed == clean_item {
-                PathBuf::from(clean_item.rsplit('/').next().unwrap_or(clean_item))
-            } else if let Some(sub) = clean_enclosed.strip_prefix(&prefix_match) {
-                let base_name = clean_item.rsplit('/').next().unwrap_or(clean_item);
-                PathBuf::from(base_name).join(sub)
-            } else {
-                PathBuf::from(clean_enclosed)
+            let Some(rel_sub) = match_rel_sub(clean_enclosed) else {
+                continue;
             };
 
             let dest = target_dir.join(rel_sub);
-            if entry.header().entry_type().is_dir() {
+            if entry_type.is_dir() {
                 fs::create_dir_all(&dest)
                     .map_err(|e| format!("Could not create directory: {e}"))?;
                 continue;
@@ -2372,15 +2545,23 @@ fn extract_archive_entry_or_dir(
     Ok(())
 }
 
+fn extract_archive_entry_or_dir(
+    archive_path: &Path,
+    clean_item: &str,
+    target_dir: &Path,
+) -> Result<(), String> {
+    extract_archive_entries_batch(archive_path, &[clean_item.to_string()], target_dir)
+}
+
 fn get_archive_entry_file_entry(
     archive_path: &Path,
     subpath: &Path,
 ) -> Result<FileEntry, String> {
-    let all_entries = get_archive_entries(archive_path)?;
+    let index = get_archive_entries(archive_path)?;
     let subpath_norm = normalize_entry_path(&subpath.to_string_lossy());
     let clean_subpath = subpath_norm.trim_matches('/').to_string();
 
-    for entry in all_entries.iter() {
+    for entry in index.entries.iter() {
         if entry.relative_path == clean_subpath {
             let name = clean_subpath
                 .rsplit('/')
@@ -2469,14 +2650,20 @@ pub async fn extract_archive_items(
                 .map_err(|e| format!("Could not create destination directory: {e}"))?;
         }
 
-        for item_rel in items {
-            let norm_item = normalize_entry_path(&item_rel);
-            let clean_item = norm_item.trim_matches('/');
-            if clean_item.is_empty() {
-                continue;
-            }
-            extract_archive_entry_or_dir(&actual_archive, clean_item, &target_dir)?;
-        }
+        let clean_items: Vec<String> = items
+            .into_iter()
+            .filter_map(|item_rel| {
+                let norm_item = normalize_entry_path(&item_rel);
+                let clean_item = norm_item.trim_matches('/').to_string();
+                if clean_item.is_empty() {
+                    None
+                } else {
+                    Some(clean_item)
+                }
+            })
+            .collect();
+
+        extract_archive_entries_batch(&actual_archive, &clean_items, &target_dir)?;
 
         bump_cache_version();
         Ok(target_dir.to_string_lossy().to_string())
@@ -2797,11 +2984,30 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        let entry_path = entry.path();
         let dest_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            fs::copy(entry.path(), &dest_path).map_err(|e| e.to_string())?;
+        if file_type.is_symlink() {
+            let target = fs::read_link(&entry_path).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                if fs::symlink_metadata(&dest_path).is_ok() {
+                    let _ = fs::remove_file(&dest_path);
+                }
+                std::os::unix::fs::symlink(&target, &dest_path).map_err(|e| e.to_string())?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = target;
+                if entry_path.is_dir() {
+                    copy_dir_recursive(&entry_path, &dest_path)?;
+                } else if entry_path.exists() {
+                    fs::copy(&entry_path, &dest_path).map_err(|e| e.to_string())?;
+                }
+            }
+        } else if file_type.is_dir() {
+            copy_dir_recursive(&entry_path, &dest_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&entry_path, &dest_path).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -3268,7 +3474,7 @@ fn open_tarball_reader(path: &Path) -> Result<Box<dyn Read>, String> {
             .map(|reader| Box::new(reader) as Box<dyn Read>)
             .map_err(|error| format!("Could not read compressed TAR archive: {error}"))
     } else if file_name.ends_with(".tar.lzma") {
-        lzma_rust2::LzmaReader::new_mem_limit(file, 512 * 1024, None)
+        lzma_rust2::LzmaReader::new_mem_limit(file, 64 * 1024 * 1024, None)
             .map(|reader| Box::new(reader) as Box<dyn Read>)
             .map_err(|error| format!("Could not read compressed TAR archive: {error}"))
     } else if file_name.ends_with(".tar") {
@@ -4036,18 +4242,22 @@ pub async fn set_default_app(
 }
 
 #[tauri::command]
-pub fn get_file_preview_url(path: String) -> Result<String, String> {
-    let resolved = resolve_input_path(&path);
-    if let Some((archive_path, subpath)) = split_archive_path(&resolved) {
-        if !subpath.as_os_str().is_empty() {
-            let extracted = extract_single_archive_entry_to_cache(&archive_path, &subpath)?;
-            return crate::download_server::register_file_preview(&extracted);
+pub async fn get_file_preview_url(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = resolve_input_path(&path);
+        if let Some((archive_path, subpath)) = split_archive_path(&resolved) {
+            if !subpath.as_os_str().is_empty() {
+                let extracted = extract_single_archive_entry_to_cache(&archive_path, &subpath)?;
+                return crate::download_server::register_file_preview(&extracted);
+            }
         }
-    }
-    if !resolved.is_file() {
-        return Err("Preview file no longer exists".to_string());
-    }
-    crate::download_server::register_file_preview(&resolved)
+        if !resolved.is_file() {
+            return Err("Preview file no longer exists".to_string());
+        }
+        crate::download_server::register_file_preview(&resolved)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn read_file_preview_internal(p: &Path, max_bytes: Option<usize>) -> Result<FilePreview, String> {
@@ -4088,14 +4298,19 @@ fn read_file_preview_internal(p: &Path, max_bytes: Option<usize>) -> Result<File
     ) || entry.mime_type.starts_with("video/");
     let is_pdf = ext == "pdf" || entry.mime_type == "application/pdf";
 
-    if is_image && entry.size <= 15 * 1024 * 1024 {
-        let bytes = fs::read(p).map_err(|e| e.to_string())?;
-        let mime = if ext == "svg" {
-            "image/svg+xml"
+    if is_image {
+        let data_url = if entry.size <= 2 * 1024 * 1024 {
+            let bytes = fs::read(p).map_err(|e| e.to_string())?;
+            let mime = if ext == "svg" {
+                "image/svg+xml"
+            } else {
+                entry.mime_type.as_str()
+            };
+            let encoded = BASE64.encode(&bytes);
+            Some(format!("data:{};base64,{}", mime, encoded))
         } else {
-            entry.mime_type.as_str()
+            crate::download_server::register_file_preview(p).ok()
         };
-        let encoded = BASE64.encode(&bytes);
         return Ok(FilePreview {
             path: entry.path,
             name: entry.name,
@@ -4109,7 +4324,7 @@ fn read_file_preview_internal(p: &Path, max_bytes: Option<usize>) -> Result<File
             child_count: None,
             preview_type: "image".to_string(),
             text_content: None,
-            data_url: Some(format!("data:{};base64,{}", mime, encoded)),
+            data_url,
             truncated: false,
         });
     }
@@ -4224,28 +4439,42 @@ pub async fn search_directory(
     query: String,
     show_hidden: bool,
 ) -> Result<Vec<FileEntry>, String> {
+    let search_gen = SEARCH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || {
+        if SEARCH_GENERATION.load(Ordering::Relaxed) != search_gen {
+            return Ok(Vec::new());
+        }
         let q = query.trim().to_lowercase();
         if q.is_empty() {
             return read_directory_sync(root_path, show_hidden);
+        }
+
+        let root = resolve_input_path(&root_path);
+        if let Some((archive_path, subpath)) = split_archive_path(&root) {
+            return search_archive_with_gen(&archive_path, &subpath, &q, show_hidden, Some(search_gen));
         }
 
         let tags_map = load_tags_map();
         let open_cfg = load_open_with_config();
         let mut results = Vec::new();
         let mut queue = std::collections::VecDeque::new();
-        let root = resolve_input_path(&root_path);
-        if let Some((archive_path, subpath)) = split_archive_path(&root) {
-            return search_archive_sync(&archive_path, &subpath, &q, show_hidden);
-        }
         queue.push_back((root, 0usize));
 
         while let Some((dir, depth)) = queue.pop_front() {
-            if results.len() >= 200 || depth > 3 {
+            if SEARCH_GENERATION.load(Ordering::Relaxed) != search_gen {
+                return Ok(Vec::new());
+            }
+            if results.len() >= 200 {
+                break;
+            }
+            if depth > 3 {
                 continue;
             }
             if let Ok(entries) = fs::read_dir(&dir) {
                 for item in entries.flatten() {
+                    if SEARCH_GENERATION.load(Ordering::Relaxed) != search_gen {
+                        return Ok(Vec::new());
+                    }
                     let file_name = item.file_name();
                     let name = file_name.to_string_lossy();
                     if !show_hidden && name.starts_with('.') {
@@ -4262,14 +4491,15 @@ pub async fn search_directory(
                             }
                         }
                     }
-                    let is_dir = item.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                    if is_dir
-                        && depth < 3
+                    if depth < 3
                         && name != "node_modules"
                         && name != "target"
                         && name != ".git"
                     {
-                        queue.push_back((p, depth + 1));
+                        let is_dir = item.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                        if is_dir {
+                            queue.push_back((p, depth + 1));
+                        }
                     }
                 }
             }
@@ -4353,10 +4583,8 @@ fn get_recent_files_sync(show_hidden: bool) -> Result<Vec<FileEntry>, String> {
         }
     }
 
-    let tags_map = load_tags_map();
-    let open_cfg = load_open_with_config();
     let mut seen = std::collections::HashSet::new();
-    let mut recent = Vec::new();
+    let mut candidates: Vec<(PathBuf, i64)> = Vec::new();
 
     for root_opt in search_roots {
         if let Ok(read_dir) = fs::read_dir(&root_opt) {
@@ -4366,25 +4594,51 @@ fn get_recent_files_sync(show_hidden: bool) -> Result<Vec<FileEntry>, String> {
                 if !show_hidden && name_str.starts_with('.') {
                     continue;
                 }
-                let is_dir = item.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                if is_dir {
+                let Ok(ft) = item.file_type() else {
+                    continue;
+                };
+                if ft.is_dir() {
                     continue;
                 }
                 let p = item.path();
-                let p_str = p.to_string_lossy().to_string();
-                if seen.contains(&p_str) {
+                let meta = if ft.is_symlink() {
+                    fs::metadata(&p).or_else(|_| item.metadata())
+                } else {
+                    item.metadata()
+                };
+                let Ok(meta) = meta else {
+                    continue;
+                };
+                if meta.is_dir() {
                     continue;
                 }
-                seen.insert(p_str);
-                if let Some(entry) = build_file_entry_with_cfg(&p, &tags_map, &open_cfg, false) {
-                    recent.push(entry);
+                let p_str = p.to_string_lossy().to_string();
+                if !seen.insert(p_str) {
+                    continue;
                 }
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                candidates.push((p, modified));
             }
         }
     }
 
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.truncate(60);
+
+    let tags_map = load_tags_map();
+    let open_cfg = load_open_with_config();
+    let mut recent = Vec::with_capacity(candidates.len());
+    for (p, _) in candidates {
+        if let Some(entry) = build_file_entry_with_cfg(&p, &tags_map, &open_cfg, false) {
+            recent.push(entry);
+        }
+    }
     recent.sort_by(|a, b| b.modified.cmp(&a.modified));
-    recent.truncate(60);
 
     if let Ok(mut guard) = cache_mutex.lock() {
         guard.insert(
@@ -4505,10 +4759,13 @@ pub async fn get_image_thumbnail(
             "jpg"
         };
 
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("vfinder/thumbnails");
-        let _ = fs::create_dir_all(&cache_dir);
+        let cache_dir = THUMBNAIL_CACHE_DIR.get_or_init(|| {
+            let dir = dirs::cache_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join("vfinder/thumbnails");
+            let _ = fs::create_dir_all(&dir);
+            dir
+        });
 
         use md5::Digest;
         let key = format!("{}:{}:{}:{}", canonical.to_string_lossy(), mtime, file_size, target_size);
@@ -4522,17 +4779,47 @@ pub async fn get_image_thumbnail(
             return Ok(cache_file.to_string_lossy().to_string());
         }
 
-        // 3. Generate downscaled thumbnail using image crate
+        // 3. Generate downscaled thumbnail using image crate with bounded decoder memory
         // Skip files > 100MB to avoid excessive memory usage
         if file_size > 100 * 1024 * 1024 {
             return Err("Image too large for thumbnail".to_string());
         }
 
-        let img = image::open(&canonical).map_err(|e| e.to_string())?;
+        let decode_slot = THUMBNAIL_DECODE_NEXT_SLOT.fetch_add(1, Ordering::Relaxed)
+            % THUMBNAIL_DECODE_SLOTS.len();
+        let _decode_guard = THUMBNAIL_DECODE_SLOTS[decode_slot]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut reader = image::ImageReader::open(&canonical)
+            .map_err(|e| e.to_string())?
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        reader.limits(limits);
+        let img = reader.decode().map_err(|e| e.to_string())?;
         let thumb = img.thumbnail(target_size, target_size);
 
-        // Save using the cache format selected above so transparent pixels survive.
-        thumb.save(&cache_file).map_err(|e| e.to_string())?;
+        // Write atomically via sibling temp file so concurrent callers never observe partial thumbnails.
+        let seq = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_file = cache_dir.join(format!(
+            ".{cache_hash}.{}.{seq}.tmp.{thumbnail_extension}",
+            std::process::id()
+        ));
+        let format = if thumbnail_extension == "png" {
+            image::ImageFormat::Png
+        } else {
+            image::ImageFormat::Jpeg
+        };
+        if let Err(err) = thumb.save_with_format(&tmp_file, format) {
+            let _ = fs::remove_file(&tmp_file);
+            return Err(err.to_string());
+        }
+        if let Err(err) = fs::rename(&tmp_file, &cache_file) {
+            let _ = fs::remove_file(&tmp_file);
+            return Err(err.to_string());
+        }
 
         Ok(cache_file.to_string_lossy().to_string())
     })
@@ -4989,6 +5276,124 @@ mod tests {
         extract_archive_entry_or_dir(&tar_path, "assets/icon.svg", &out_dir).unwrap();
         assert!(out_dir.join("icon.svg").exists());
         assert_eq!(fs::read_to_string(out_dir.join("icon.svg")).unwrap(), "<svg><circle/></svg>");
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_normalize_entry_path_sanitization() {
+        assert_eq!(normalize_entry_path("./docs/guide.md"), "docs/guide.md");
+        assert_eq!(normalize_entry_path("/docs//guide.md"), "docs/guide.md");
+        assert_eq!(normalize_entry_path("docs/"), "docs/");
+        assert_eq!(normalize_entry_path("a\\b\\"), "a/b/");
+        assert_eq!(normalize_entry_path("../../etc/passwd"), "etc/passwd");
+        assert_eq!(normalize_entry_path("foo/./bar/../baz"), "foo/bar/baz");
+        assert_eq!(normalize_entry_path("./"), "");
+        assert_eq!(normalize_entry_path(".."), "");
+    }
+
+    #[test]
+    fn test_archive_hidden_and_batch_extraction_safety() {
+        let tmp_dir = std::env::temp_dir().join("vfinder_test_wave2_archive");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+        let tar_path = tmp_dir.join("wave2.tar.gz");
+
+        {
+            let file = fs::File::create(&tar_path).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar_builder = tar::Builder::new(encoder);
+
+            let mut h_hidden = tar::Header::new_gnu();
+            let d_hidden = b"secret";
+            h_hidden.set_size(d_hidden.len() as u64);
+            h_hidden.set_mode(0o644);
+            h_hidden.set_cksum();
+            tar_builder.append_data(&mut h_hidden, "dir/.env", &d_hidden[..]).unwrap();
+
+            let mut h_vis = tar::Header::new_gnu();
+            let d_vis = b"public";
+            h_vis.set_size(d_vis.len() as u64);
+            h_vis.set_mode(0o644);
+            h_vis.set_cksum();
+            tar_builder.append_data(&mut h_vis, "dir/readme.txt", &d_vis[..]).unwrap();
+
+            let mut h_sym = tar::Header::new_gnu();
+            h_sym.set_entry_type(tar::EntryType::Symlink);
+            h_sym.set_size(0);
+            h_sym.set_mode(0o777);
+            h_sym.set_link_name("/etc/passwd").unwrap();
+            h_sym.set_cksum();
+            tar_builder.append_data(&mut h_sym, "dir/badlink", std::io::empty()).unwrap();
+
+            tar_builder.finish().unwrap();
+        }
+
+        let dir_hidden_off = read_archive_directory_sync(&tar_path, Path::new("dir"), false).unwrap();
+        assert_eq!(dir_hidden_off.len(), 2); // readme.txt + badlink (not dotfile)
+        assert!(!dir_hidden_off.iter().any(|e| e.name == ".env"));
+
+        let dir_hidden_on = read_archive_directory_sync(&tar_path, Path::new("dir"), true).unwrap();
+        let env_entry = dir_hidden_on.iter().find(|e| e.name == ".env").unwrap();
+        assert!(env_entry.is_hidden);
+
+        let root_entries = read_archive_directory_sync(&tar_path, Path::new(""), false).unwrap();
+        let dir_entry = root_entries.iter().find(|e| e.name == "dir").unwrap();
+        assert_eq!(dir_entry.child_count, Some(3));
+
+        let out_dir = tmp_dir.join("batch_out");
+        fs::create_dir_all(&out_dir).unwrap();
+        extract_archive_entries_batch(&tar_path, &["dir".to_string()], &out_dir).unwrap();
+        assert_eq!(fs::read_to_string(out_dir.join("dir/.env")).unwrap(), "secret");
+        assert_eq!(fs::read_to_string(out_dir.join("dir/readme.txt")).unwrap(), "public");
+        assert!(fs::symlink_metadata(out_dir.join("dir/badlink")).is_err());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_wave3_special_file_copy_and_large_image_preview() {
+        let tmp_dir = std::env::temp_dir().join("vfinder_test_wave3");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let src_dir = tmp_dir.join("src");
+        let dst_dir = tmp_dir.join("dst");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(src_dir.join("regular.txt"), b"hello").unwrap();
+        let sock_path = src_dir.join("test.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+
+        copy_dir_recursive(&src_dir, &dst_dir).unwrap();
+        assert_eq!(fs::read_to_string(dst_dir.join("regular.txt")).unwrap(), "hello");
+        assert!(fs::symlink_metadata(dst_dir.join("test.sock")).is_err());
+
+        let small_png = tmp_dir.join("small.png");
+        fs::write(&small_png, b"\x89PNG\r\n\x1a\n").unwrap();
+        let small_prev = read_file_preview_internal(&small_png, None).unwrap();
+        assert_eq!(small_prev.preview_type, "image");
+        assert!(small_prev
+            .data_url
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("data:image/png;base64,"));
+
+        let large_png = tmp_dir.join("large.png");
+        {
+            let f = fs::File::create(&large_png).unwrap();
+            f.set_len(3 * 1024 * 1024).unwrap();
+        }
+        let large_prev = read_file_preview_internal(&large_png, None).unwrap();
+        assert_eq!(large_prev.preview_type, "image");
+        assert!(!large_prev
+            .data_url
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("data:"));
+
+        let os1 = get_system_os_name();
+        let os2 = get_system_os_name();
+        assert!(!os1.is_empty());
+        assert_eq!(os1, os2);
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }

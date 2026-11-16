@@ -108,8 +108,13 @@ function areEntriesEqual(a: FileEntry[], b: FileEntry[]): boolean {
     const y = b[i];
     if (
       x.path !== y.path ||
+      x.name !== y.name ||
+      x.isDir !== y.isDir ||
       x.modified !== y.modified ||
       x.size !== y.size ||
+      x.permissions !== y.permissions ||
+      Boolean(x.isExecutable) !== Boolean(y.isExecutable) ||
+      (x.childCount ?? null) !== (y.childCount ?? null) ||
       x.defaultApp !== y.defaultApp ||
       x.tags.length !== y.tags.length
     ) {
@@ -638,16 +643,65 @@ export const App: React.FC = () => {
     }
   });
 
-  // In-memory directory cache for 0ms instant folder switching
+  // In-memory bounded LRU directory cache for 0ms instant folder switching
+  const MAX_DIR_CACHE_ENTRIES = 50;
   const dirCacheRef = useRef<Map<string, FileEntry[]>>(new Map());
   const requestIdRef = useRef(0);
+  const toastTimerRef = useRef<number | null>(null);
+
+  const getDirCache = useCallback((key: string): FileEntry[] | undefined => {
+    const value = dirCacheRef.current.get(key);
+    if (value !== undefined) {
+      dirCacheRef.current.delete(key);
+      dirCacheRef.current.set(key, value);
+    }
+    return value;
+  }, []);
+
+  const setDirCache = useCallback((key: string, entriesList: FileEntry[]) => {
+    const cache = dirCacheRef.current;
+    if (cache.has(key)) {
+      cache.delete(key);
+    }
+    cache.set(key, entriesList);
+    while (cache.size > MAX_DIR_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey === undefined) break;
+      cache.delete(oldestKey);
+    }
+  }, []);
+
+  const getSplitCachedEntries = useCallback(
+    (path: string, hidden: boolean) => getDirCache(`${path}::${hidden}::`),
+    [getDirCache]
+  );
+
+  const setSplitCachedEntries = useCallback(
+    (path: string, hidden: boolean, list: FileEntry[]) =>
+      setDirCache(`${path}::${hidden}::`, list),
+    [setDirCache]
+  );
 
   const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
     setToast(msg);
-    setTimeout(() => {
-      setToast((prev) => (prev === msg ? null : prev));
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
     }, 2800);
   }, []);
+
+  useEffect(
+    () => () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    },
+    []
+  );
 
   const activeTab = useMemo(
     () => tabs.find((t) => t.id === activeTabId) || tabs[0],
@@ -752,7 +806,7 @@ export const App: React.FC = () => {
       prefetchingPathsRef.current.add(cacheKey);
       apiReadDirectory(path, showHidden)
         .then((list) => {
-          dirCacheRef.current.set(cacheKey, list);
+          setDirCache(cacheKey, list);
         })
         .catch(() => {
           // ignore background prefetch errors
@@ -761,13 +815,13 @@ export const App: React.FC = () => {
           prefetchingPathsRef.current.delete(cacheKey);
         });
     },
-    [showHidden]
+    [setDirCache, showHidden]
   );
 
   const applyCachedEntriesIfAvailable = useCallback(
     (targetPath: string, targetTag: string | null = null) => {
       const cacheKey = `${targetTag || targetPath}::${showHidden}::`;
-      const cached = dirCacheRef.current.get(cacheKey);
+      const cached = getDirCache(cacheKey);
       if (cached) {
         setEntries((prev) => (areEntriesEqual(prev, cached) ? prev : cached));
         setEntriesReady(true);
@@ -777,13 +831,17 @@ export const App: React.FC = () => {
         setEntriesReady(false);
       }
     },
-    [showHidden]
+    [getDirCache, showHidden]
   );
+
+  const lastVolumePollRef = useRef(0);
+  const volumePollInFlightRef = useRef(false);
 
   // Initial sidebar load (does not reset tabs if path already matches homeDir)
   const refreshSidebar = useCallback(async () => {
     try {
       const data = await apiGetSidebarData();
+      lastVolumePollRef.current = Date.now();
       setSidebarData(data);
       return data;
     } catch (err) {
@@ -868,7 +926,7 @@ export const App: React.FC = () => {
       apiPrefetchDirectories(uncachedPaths, showHidden)
         .then((batchMap) => {
           for (const [p, list] of Object.entries(batchMap)) {
-            dirCacheRef.current.set(`${p}::${showHidden}::`, list);
+            setDirCache(`${p}::${showHidden}::`, list);
           }
         })
         .catch(() => {
@@ -887,15 +945,24 @@ export const App: React.FC = () => {
     sidebarData?.favorites,
     customFavorites,
     hiddenFavorites,
+    setDirCache,
     showHidden,
   ]);
 
   // Auto-detect removable thumb drives & hardware volume changes
   useEffect(() => {
     let mounted = true;
-    const pollVolumes = async () => {
+    const pollVolumes = async (respectCooldown: boolean) => {
+      const now = Date.now();
+      if (volumePollInFlightRef.current) return;
+      if (respectCooldown && now - lastVolumePollRef.current < 3000) {
+        return;
+      }
+      volumePollInFlightRef.current = true;
+      lastVolumePollRef.current = now;
       try {
         const newData = await apiGetSidebarData();
+        lastVolumePollRef.current = Date.now();
         if (!mounted) return;
         setSidebarData((prev) => {
           if (!prev) return newData;
@@ -918,15 +985,19 @@ export const App: React.FC = () => {
         });
       } catch {
         // ignore background poll errors
+      } finally {
+        volumePollInFlightRef.current = false;
       }
     };
 
     // Sidebar data includes favorite discovery and volume metadata. Polling it
-    // every 2.5s repeats that work even when nothing changed; focus still
-    // triggers an immediate refresh when returning to the app.
-    const interval = setInterval(pollVolumes, 10_000);
+    // every 10s repeats that work even when nothing changed; focus triggers an
+    // immediate refresh throttled by a 3s cooldown.
+    const interval = setInterval(() => {
+      void pollVolumes(false);
+    }, 10_000);
     const onFocus = () => {
-      pollVolumes();
+      void pollVolumes(true);
     };
     window.addEventListener("focus", onFocus);
 
@@ -951,14 +1022,14 @@ export const App: React.FC = () => {
         dirCacheRef.current.clear();
         setRefreshVersion((v) => v + 1);
       } else {
-        const cached = dirCacheRef.current.get(cacheKey);
+        const cached = getDirCache(cacheKey);
         if (cached) {
           setEntries((prev) => (areEntriesEqual(prev, cached) ? prev : cached));
         }
       }
 
       const isArchive = Boolean(findArchiveRootFromPath(targetPath));
-      const cached = dirCacheRef.current.get(cacheKey);
+      const cached = dirCacheRef.current.has(cacheKey);
       if (isArchive && !cached) {
         const archName = targetPath.split(/[\\/]/).pop() || targetPath;
         setOpeningArchive((cur) =>
@@ -995,7 +1066,7 @@ export const App: React.FC = () => {
         ) {
           return;
         }
-        dirCacheRef.current.set(cacheKey, list);
+        setDirCache(cacheKey, list);
         setEntries((prev) => (areEntriesEqual(prev, list) ? prev : list));
       } catch (err) {
         if (
@@ -1017,7 +1088,15 @@ export const App: React.FC = () => {
         setOpeningArchive((cur) => (cur?.path === targetPath ? null : cur));
       }
     },
-    [activeTab?.path, activeTab?.activeTag, debouncedSearchQuery, showHidden, showToast]
+    [
+      activeTab?.path,
+      activeTab?.activeTag,
+      debouncedSearchQuery,
+      getDirCache,
+      setDirCache,
+      showHidden,
+      showToast,
+    ]
   );
 
   const recordMoveUndo = useCallback(
@@ -3705,6 +3784,30 @@ export const App: React.FC = () => {
   // Global macOS Finder Keyboard Shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        getInfoEntry ||
+        getInfoVolume ||
+        openWithEntry ||
+        formatVolume ||
+        firstAidVolume ||
+        sudoPrompt
+      ) {
+        if (e.key === "Escape") {
+          if (openWithEntry) {
+            e.preventDefault();
+            setOpenWithEntry(null);
+          } else if (getInfoEntry || getInfoVolume) {
+            e.preventDefault();
+            setGetInfoEntry(null);
+            setGetInfoVolume(null);
+          } else if (sudoPrompt && !sudoPrompt.busy) {
+            e.preventDefault();
+            setSudoPrompt(null);
+          }
+        }
+        return;
+      }
+
       const cmdOrCtrl = e.ctrlKey;
 
       // Focus the toolbar search field (and select its query) from anywhere.
@@ -3813,6 +3916,7 @@ export const App: React.FC = () => {
       if (
         renamingPath ||
         tag === "TEXTAREA" ||
+        tag === "SELECT" ||
         (tag === "INPUT" && !targetEl?.hasAttribute("data-file-search"))
       ) {
         return;
@@ -3857,6 +3961,7 @@ export const App: React.FC = () => {
       }
       if (
         tag === "TEXTAREA" ||
+        tag === "SELECT" ||
         (tag === "INPUT" && targetEl?.type !== "range")
       ) {
         return;
@@ -4244,6 +4349,9 @@ export const App: React.FC = () => {
     quickLookEntry,
     getInfoEntry,
     getInfoVolume,
+    formatVolume,
+    firstAidVolume,
+    sudoPrompt,
     contextMenu,
     trashConfirmModal,
     confirmTrashAction,
@@ -4858,7 +4966,10 @@ export const App: React.FC = () => {
                 initialTitle={splitPane.title}
                 initialTag={splitPane.activeTag}
                 darkMode={darkMode}
+                showHidden={showHidden}
                 refreshVersion={splitPaneRefreshVersion}
+                getCachedEntries={getSplitCachedEntries}
+                onCacheEntries={setSplitCachedEntries}
                 onActivePane={() => {
                   activePaneRef.current = "split";
                 }}

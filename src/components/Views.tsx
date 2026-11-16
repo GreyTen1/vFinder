@@ -22,6 +22,35 @@ export interface SelectionModifiers {
   shift: boolean;
 }
 
+const VIEW_IMAGE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "bmp",
+  "ico",
+  "avif",
+  "jfif",
+]);
+const ARCHIVE_SUBPATH_RE =
+  /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2?|tar\.xz|txz|tar\.zst|tzst|tar\.lzma)\//i;
+
+function isImageFileEntry(entry: FileEntry | null | undefined): boolean {
+  if (!entry || entry.isDir || !entry.path) return false;
+  const ext = (entry.extension || "").toLowerCase();
+  return (
+    Boolean(entry.mimeType?.startsWith("image/")) ||
+    VIEW_IMAGE_EXTENSIONS.has(ext)
+  );
+}
+
+function isArchiveSubpath(path: string | null | undefined): boolean {
+  if (!path) return false;
+  return ARCHIVE_SUBPATH_RE.test(path.replace(/\\/g, "/"));
+}
+
 export interface CommonViewProps {
   entries: FileEntry[];
   revealPath?: string | null;
@@ -72,6 +101,14 @@ interface MarqueeRect {
   height: number;
 }
 
+interface CachedMarqueeItem {
+  path: string;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 /**
  * Reusable hook for macOS Finder rubber-band (marquee) cursor selection
  * inside a scrollable view container, including auto-scrolling on edges.
@@ -104,6 +141,9 @@ export function useMarqueeSelection({
 
   const onClickEntryFallbackRef = useRef(onClickEntryFallback);
   onClickEntryFallbackRef.current = onClickEntryFallback;
+
+  const cleanupDragRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => cleanupDragRef.current?.(), []);
 
   const handleContainerMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -149,6 +189,7 @@ export function useMarqueeSelection({
     }
 
     e.preventDefault();
+    cleanupDragRef.current?.();
 
     const startClientX = e.clientX;
     const startClientY = e.clientY;
@@ -158,36 +199,40 @@ export function useMarqueeSelection({
 
     const additive = e.ctrlKey || e.shiftKey;
     const baseSelection = additive ? [...selectedPathsRef.current] : [];
+    const baseSelectionSet = new Set(baseSelection);
 
     let isMarqueeActive = false;
     let lastClientX = startClientX;
     let lastClientY = startClientY;
     let autoScrollFrame: number | null = null;
-    let cachedItems: {
-      path: string;
-      left: number;
-      top: number;
-      right: number;
-      bottom: number;
-    }[] | null = null;
+    let cachedItems: Map<string, CachedMarqueeItem> | null = null;
     let prevSelectionKey = selectedPathsRef.current.join("\0");
 
-    const buildCachedItems = (
+    // Measure only newly mounted entry nodes so auto-scrolling doesn't trigger
+    // O(N) getBoundingClientRect() layout thrashing on every animation frame.
+    const appendMissingCachedItems = (
       c: HTMLDivElement,
-      previousItems: NonNullable<typeof cachedItems> = []
+      itemsByPath: Map<string, CachedMarqueeItem>,
+      premeasuredRect?: DOMRect
     ) => {
-      const cRect = c.getBoundingClientRect();
-      const sLeft = c.scrollLeft;
-      const sTop = c.scrollTop;
       const nodes = c.querySelectorAll<HTMLElement>("[data-entry-path]");
-      const itemsByPath = new Map(previousItems.map((item) => [item.path, item]));
+      let cRect: DOMRect | null = premeasuredRect ?? null;
+      let sLeft = 0;
+      let sTop = 0;
+      let initialized = false;
       nodes.forEach((node) => {
         const p = node.getAttribute("data-entry-path");
-        if (!p) return;
+        if (!p || itemsByPath.has(p)) return;
+        if (!initialized) {
+          cRect = cRect ?? c.getBoundingClientRect();
+          sLeft = c.scrollLeft;
+          sTop = c.scrollTop;
+          initialized = true;
+        }
         const nRect = node.getBoundingClientRect();
         if (nRect.width <= 0 || nRect.height <= 0) return;
-        const left = nRect.left - cRect.left + sLeft;
-        const top = nRect.top - cRect.top + sTop;
+        const left = nRect.left - cRect!.left + sLeft;
+        const top = nRect.top - cRect!.top + sTop;
         itemsByPath.set(p, {
           path: p,
           left,
@@ -196,16 +241,20 @@ export function useMarqueeSelection({
           bottom: top + nRect.height,
         });
       });
-      return Array.from(itemsByPath.values());
     };
 
-    const updateMarquee = (clientX: number, clientY: number) => {
+    const updateMarquee = (
+      clientX: number,
+      clientY: number,
+      premeasuredRect?: DOMRect
+    ) => {
       const c = containerRef.current;
       if (!c) return;
+      const cRect = premeasuredRect ?? c.getBoundingClientRect();
       if (!cachedItems) {
-        cachedItems = buildCachedItems(c);
+        cachedItems = new Map();
+        appendMissingCachedItems(c, cachedItems, cRect);
       }
-      const cRect = c.getBoundingClientRect();
       const curScrollX = Math.max(
         0,
         Math.min(c.scrollWidth, c.scrollLeft + (clientX - cRect.left))
@@ -223,8 +272,7 @@ export function useMarqueeSelection({
       setMarqueeRect({ left, top, width, height });
 
       const hitPaths: string[] = [];
-      for (let i = 0; i < cachedItems.length; i++) {
-        const item = cachedItems[i];
+      for (const item of cachedItems.values()) {
         if (
           item.left < left + width &&
           item.right > left &&
@@ -240,7 +288,7 @@ export function useMarqueeSelection({
         const combined = new Set(baseSelection);
         for (let i = 0; i < hitPaths.length; i++) {
           const p = hitPaths[i];
-          if (baseSelection.includes(p)) {
+          if (baseSelectionSet.has(p)) {
             combined.delete(p);
           } else {
             combined.add(p);
@@ -289,8 +337,11 @@ export function useMarqueeSelection({
       }
 
       if (scrolled) {
-        cachedItems = buildCachedItems(c, cachedItems || []);
-        updateMarquee(lastClientX, lastClientY);
+        if (!cachedItems) {
+          cachedItems = new Map();
+        }
+        appendMissingCachedItems(c, cachedItems, cRect);
+        updateMarquee(lastClientX, lastClientY, cRect);
       }
       autoScrollFrame = requestAnimationFrame(tickAutoScroll);
     };
@@ -323,9 +374,10 @@ export function useMarqueeSelection({
       }
     };
 
-    const onMouseUp = (ev: MouseEvent) => {
+    const cleanupDrag = () => {
       if (autoScrollFrame !== null) {
         cancelAnimationFrame(autoScrollFrame);
+        autoScrollFrame = null;
       }
       if (marqueeRaf !== null) {
         cancelAnimationFrame(marqueeRaf);
@@ -333,6 +385,13 @@ export function useMarqueeSelection({
       }
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
+      if (cleanupDragRef.current === cleanupDrag) {
+        cleanupDragRef.current = null;
+      }
+    };
+
+    const onMouseUp = (ev: MouseEvent) => {
+      cleanupDrag();
 
       if (isMarqueeActive) {
         updateMarquee(ev.clientX, ev.clientY);
@@ -350,6 +409,7 @@ export function useMarqueeSelection({
       }
     };
 
+    cleanupDragRef.current = cleanupDrag;
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
   }, [containerRef]);
@@ -679,9 +739,9 @@ export const IconView: React.FC<CommonViewProps> = ({
     []
   );
 
-  // Temporarily render the full grid during an external reveal so the target
-  // exists in the DOM and can be centered before virtualization resumes.
-  const isLargeGrid = entries.length > ICON_VIRTUALIZATION_THRESHOLD && !revealPath;
+  // Keep grid virtualization active during reveals; revealEntryIndex below
+  // mounts the revealed entry directly at its virtual grid coordinates.
+  const isLargeGrid = entries.length > ICON_VIRTUALIZATION_THRESHOLD;
   const contentWidth = Math.max(0, gridViewport.width - 40);
   const rawColumnCount = Math.max(1, Math.floor((contentWidth + 12) / (cellWidth + 12)));
   const columnCount = isLargeGrid ? rawColumnCount : 1;
@@ -1070,6 +1130,8 @@ export const ListView: React.FC<CommonViewProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [closingPaths, setClosingPaths] = useState<Set<string>>(new Set());
+  const closingTimersRef = useRef<Map<string, number>>(new Map());
   const [dirCache, setDirCache] = useState<Record<string, FileEntry[]>>({});
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(600);
@@ -1082,9 +1144,20 @@ export const ListView: React.FC<CommonViewProps> = ({
   useEffect(() => {
     if (prevFolderKeyRef.current !== currentFolderKey) {
       prevFolderKeyRef.current = currentFolderKey;
+      closingTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      closingTimersRef.current.clear();
+      setClosingPaths(new Set());
       setExpandedPaths(new Set());
     }
   }, [currentFolderKey]);
+
+  useEffect(
+    () => () => {
+      closingTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      closingTimersRef.current.clear();
+    },
+    []
+  );
 
   const expandedPathsRef = useRef<Set<string>>(expandedPaths);
   expandedPathsRef.current = expandedPaths;
@@ -1195,15 +1268,18 @@ export const ListView: React.FC<CommonViewProps> = ({
     const visit = (items: FileEntry[]) => {
       for (const item of items) {
         count++;
-        const cachedChildren = sortedDirCache[item.path];
-        // The animated tree keeps cached children mounted while a folder is
-        // collapsed, so count them when deciding whether to virtualize.
-        if (item.isDir && cachedChildren) visit(cachedChildren);
+        if (
+          item.isDir &&
+          (expandedPaths.has(item.path) || closingPaths.has(item.path))
+        ) {
+          const cachedChildren = sortedDirCache[item.path];
+          if (cachedChildren) visit(cachedChildren);
+        }
       }
     };
     visit(entries);
     return count;
-  }, [entries, sortedDirCache]);
+  }, [entries, expandedPaths, closingPaths, sortedDirCache]);
   const isLargeList = renderedRowCount > LIST_VIRTUALIZATION_THRESHOLD;
 
   const virtualRows = useMemo(() => {
@@ -1343,8 +1419,29 @@ export const ListView: React.FC<CommonViewProps> = ({
       const p = dirEntry.path;
       markFolderAnimationActive(220);
 
-      // If already expanded, collapse it immediately
+      // If already expanded, collapse it and keep mounted only for the 220ms collapse animation
       if (expandedPathsRef.current.has(p)) {
+        const existingTimer = closingTimersRef.current.get(p);
+        if (existingTimer !== undefined) {
+          window.clearTimeout(existingTimer);
+        }
+        setClosingPaths((prev) => {
+          if (prev.has(p)) return prev;
+          const next = new Set(prev);
+          next.add(p);
+          return next;
+        });
+        const timerId = window.setTimeout(() => {
+          closingTimersRef.current.delete(p);
+          setClosingPaths((prev) => {
+            if (!prev.has(p)) return prev;
+            const next = new Set(prev);
+            next.delete(p);
+            return next;
+          });
+        }, 220);
+        closingTimersRef.current.set(p, timerId);
+
         setExpandedPaths((prev) => {
           const next = new Set(prev);
           next.delete(p);
@@ -1353,6 +1450,18 @@ export const ListView: React.FC<CommonViewProps> = ({
         });
         return;
       }
+
+      const pendingTimer = closingTimersRef.current.get(p);
+      if (pendingTimer !== undefined) {
+        window.clearTimeout(pendingTimer);
+        closingTimersRef.current.delete(p);
+      }
+      setClosingPaths((prev) => {
+        if (!prev.has(p)) return prev;
+        const next = new Set(prev);
+        next.delete(p);
+        return next;
+      });
 
       // Check if prefetched items exist and put them into dirCache immediately
       const prefetched = prefetchedMapRef.current.get(p);
@@ -1430,7 +1539,7 @@ export const ListView: React.FC<CommonViewProps> = ({
           onRenameSubmit={onRenameSubmit}
           onRenameCancel={onRenameCancel}
         />
-        {entry.isDir && (
+        {entry.isDir && (isExpanded || closingPaths.has(entry.path)) && (
           <div className={`folder-unfold-grid ${isExpanded ? "is-expanded" : ""}`}>
             <div className="folder-unfold-inner">
               {children === undefined ? (
@@ -2102,11 +2211,16 @@ export const ColumnView: React.FC<
   sortField,
   sortDirection,
   showHidden,
+  isArchiveWorkspace = false,
   onToggleTag,
   onQuickLook,
   onActiveDirectoryChange,
 }) => {
   const columnsContainerRef = useRef<HTMLDivElement>(null);
+  const sortFieldRef = useRef(sortField);
+  sortFieldRef.current = sortField;
+  const sortDirectionRef = useRef(sortDirection);
+  sortDirectionRef.current = sortDirection;
   const [columns, setColumns] = useState<ColumnPane[]>(() => [
     {
       path: currentPath,
@@ -2229,7 +2343,11 @@ export const ColumnView: React.FC<
           prefetchedMapRef.current.set(col.path, sub);
           return {
             path: col.path,
-            entries: sortEntriesList(sub, sortField, sortDirection),
+            entries: sortEntriesList(
+              sub,
+              sortFieldRef.current,
+              sortDirectionRef.current
+            ),
           };
         } catch {
           return null;
@@ -2254,7 +2372,7 @@ export const ColumnView: React.FC<
     return () => {
       cancelled = true;
     };
-  }, [refreshVersion, showHidden, sortField, sortDirection]);
+  }, [refreshVersion, showHidden]);
 
   const handleFocusColumn = useCallback(
     (colIdx: number) => {
@@ -2351,6 +2469,20 @@ export const ColumnView: React.FC<
         setActiveColIndex(colIndex);
         columnsRef.current = updated;
         setColumns(updated);
+        if (
+          isImageFileEntry(entry) &&
+          !isArchiveWorkspace &&
+          !isArchiveSubpath(entry.path)
+        ) {
+          try {
+            if (convertFileSrc(entry.path)) {
+              setPreview(null);
+              return;
+            }
+          } catch {
+            // fall through to apiReadFilePreview
+          }
+        }
         try {
           const p = await apiReadFilePreview(entry.path, 32768);
           if (selectReqIdRef.current === reqId) {
@@ -2363,7 +2495,7 @@ export const ColumnView: React.FC<
         }
       }
     },
-    [onSelect, showHidden, sortField, sortDirection]
+    [isArchiveWorkspace, onSelect, showHidden, sortField, sortDirection]
   );
 
   const activeFile =
@@ -2371,6 +2503,22 @@ export const ColumnView: React.FC<
     !columns[columns.length - 1]?.selectedEntry?.isDir
       ? columns[columns.length - 1].selectedEntry
       : null;
+
+  const activeImageSrc = useMemo(() => {
+    if (
+      !activeFile ||
+      !isImageFileEntry(activeFile) ||
+      isArchiveWorkspace ||
+      isArchiveSubpath(activeFile.path)
+    ) {
+      return null;
+    }
+    try {
+      return convertFileSrc(activeFile.path);
+    } catch {
+      return null;
+    }
+  }, [activeFile, isArchiveWorkspace]);
 
   useEffect(() => {
     if (!activeFile || preview?.previewType !== "pdf") {
@@ -2431,9 +2579,9 @@ export const ColumnView: React.FC<
           }`}
         >
           <div className="flex flex-col items-center text-center pb-4 border-b border-current/10">
-            {preview?.previewType === "image" && preview.dataUrl ? (
+            {activeImageSrc || (preview?.previewType === "image" && preview.dataUrl) ? (
               <img
-                src={preview.dataUrl}
+                src={activeImageSrc || preview?.dataUrl || ""}
                 alt={activeFile.name}
                 style={{ maxHeight: inspectorImgMaxH }}
                 className="rounded-lg shadow-md object-contain mb-3 border border-white/10"
@@ -2538,6 +2686,8 @@ export const ColumnView: React.FC<
 /* ============================================================================
  * 4. GALLERY VIEW (macOS Finder Stage + Filmstrip + Inspector)
  * ========================================================================== */
+const GALLERY_VIRTUALIZATION_THRESHOLD = 80;
+
 export const GalleryView: React.FC<CommonViewProps> = ({
   entries,
   selectedPaths,
@@ -2556,7 +2706,14 @@ export const GalleryView: React.FC<CommonViewProps> = ({
   const stageImgScale = Math.max(0.65, Math.min(1.5, 0.75 + 0.25 * zoomScale));
   const thumbIconSize = Math.max(28, Math.min(84, Math.round(40 * zoomScale)));
   const thumbBoxSize = thumbIconSize + 32;
+  const thumbPitch = thumbBoxSize + 12;
   const stripHeight = thumbBoxSize + 24;
+
+  const filmstripRef = useRef<HTMLDivElement>(null);
+  const [stripScrollLeft, setStripScrollLeft] = useState(0);
+  const [stripViewportWidth, setStripViewportWidth] = useState(800);
+  const stripScrollFrameRef = useRef<number | null>(null);
+  const isLargeFilmstrip = entries.length > GALLERY_VIRTUALIZATION_THRESHOLD;
 
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const draggedSet = useMemo(() => new Set(draggedPaths), [draggedPaths]);
@@ -2565,18 +2722,80 @@ export const GalleryView: React.FC<CommonViewProps> = ({
     () => entries.find((e) => selectedSet.has(e.path)) || entries[0] || null,
     [entries, selectedSet]
   );
+
+  useEffect(() => {
+    if (!isLargeFilmstrip) return;
+    const container = filmstripRef.current;
+    if (!container) return;
+    const updateMetrics = () => {
+      setStripViewportWidth(container.clientWidth);
+      setStripScrollLeft(container.scrollLeft);
+    };
+    updateMetrics();
+    const observer = new ResizeObserver(updateMetrics);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [isLargeFilmstrip]);
+
+  const handleFilmstripScroll = useCallback(() => {
+    if (!isLargeFilmstrip || stripScrollFrameRef.current !== null) return;
+    stripScrollFrameRef.current = requestAnimationFrame(() => {
+      stripScrollFrameRef.current = null;
+      setStripScrollLeft(filmstripRef.current?.scrollLeft || 0);
+    });
+  }, [isLargeFilmstrip]);
+
+  useEffect(
+    () => () => {
+      if (stripScrollFrameRef.current !== null) {
+        cancelAnimationFrame(stripScrollFrameRef.current);
+      }
+    },
+    []
+  );
+
+  const filmstripOverscan = 8;
+  const firstVisibleIndex = isLargeFilmstrip
+    ? Math.max(
+        0,
+        Math.floor(Math.max(0, stripScrollLeft - 16) / thumbPitch) - filmstripOverscan
+      )
+    : 0;
+  const lastVisibleIndex = isLargeFilmstrip
+    ? Math.min(
+        entries.length,
+        Math.ceil(
+          Math.max(0, stripScrollLeft + stripViewportWidth - 16) / thumbPitch
+        ) + filmstripOverscan
+      )
+    : entries.length;
+  const renderedFilmstripItems = useMemo(() => {
+    const slice = isLargeFilmstrip
+      ? entries.slice(firstVisibleIndex, lastVisibleIndex)
+      : entries;
+    const items = slice.map((entry, idx) => ({
+      entry,
+      index: isLargeFilmstrip ? firstVisibleIndex + idx : idx,
+    }));
+    if (isLargeFilmstrip && activeEntry) {
+      const activeIdx = entries.findIndex((e) => e.path === activeEntry.path);
+      if (
+        activeIdx >= 0 &&
+        (activeIdx < firstVisibleIndex || activeIdx >= lastVisibleIndex)
+      ) {
+        items.push({ entry: entries[activeIdx], index: activeIdx });
+      }
+    }
+    return items;
+  }, [activeEntry, entries, firstVisibleIndex, isLargeFilmstrip, lastVisibleIndex]);
+
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<{ path: string; url: string } | null>(null);
   const [videoStreamError, setVideoStreamError] = useState<{ path: string; message: string } | null>(null);
 
   const ext = (activeEntry?.extension || "").toLowerCase();
-  const isImage =
-    Boolean(activeEntry) &&
-    !activeEntry?.isDir &&
-    Boolean(activeEntry?.path) &&
-    (Boolean(activeEntry?.mimeType?.startsWith("image/")) ||
-      ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "jfif"].includes(ext));
+  const isImage = isImageFileEntry(activeEntry);
   const isVideo =
     Boolean(activeEntry) &&
     !activeEntry?.isDir &&
@@ -2659,6 +2878,47 @@ export const GalleryView: React.FC<CommonViewProps> = ({
     );
   }
 
+  const renderFilmstripItem = (
+    entry: FileEntry,
+    positionStyle?: React.CSSProperties,
+    positionClass = ""
+  ) => {
+    const isSelected = selectedSet.has(entry.path) || activeEntry.path === entry.path;
+    const isDropTarget = entry.isDir && dropTargetPath === entry.path;
+    const isBeingDragged = draggedSet.has(entry.path);
+    return (
+      <div
+        key={entry.path}
+        data-entry-path={entry.path}
+        data-drop-path={entry.isDir ? entry.path : undefined}
+        data-drop-name={entry.isDir ? entry.name : undefined}
+        style={{ width: thumbBoxSize, height: thumbBoxSize, ...positionStyle }}
+        onMouseDown={(e) => onStartItemDrag(e, entry, entries)}
+        onDoubleClick={() => onOpenEntry(entry)}
+        onContextMenu={(e) => {
+          e.stopPropagation();
+          onContextMenu(e, entry);
+        }}
+        className={`${positionClass} p-2 rounded-xl flex flex-col items-center justify-center shrink-0 cursor-pointer ${
+          isBeingDragged ? "opacity-45" : ""
+        } ${
+          isDropTarget
+            ? "bg-[#0a84ff]/35 ring-2 ring-[#0a84ff]"
+            : isSelected
+            ? darkMode
+              ? "bg-white/15"
+              : "bg-black/10"
+            : "hover:bg-white/5 opacity-75 hover:opacity-100"
+        }`}
+      >
+        <FileIcon entry={entry} size={thumbIconSize} />
+        <span className="text-[10px] truncate w-full mt-1 text-center">
+          {entry.name}
+        </span>
+      </div>
+    );
+  };
+
   return (
     <div
       onDragStart={(e) => e.preventDefault()}
@@ -2736,7 +2996,9 @@ export const GalleryView: React.FC<CommonViewProps> = ({
 
         {/* Bottom Horizontal Filmstrip */}
         <div
+          ref={filmstripRef}
           data-tab-scroll-view="gallery"
+          onScroll={isLargeFilmstrip ? handleFilmstripScroll : undefined}
           style={{ height: stripHeight }}
           className={`border-t px-4 flex items-center gap-3 overflow-x-auto ${
             darkMode
@@ -2744,42 +3006,21 @@ export const GalleryView: React.FC<CommonViewProps> = ({
               : "bg-black/[0.03] border-black/10"
           }`}
         >
-          {entries.map((entry) => {
-            const isSelected = selectedSet.has(entry.path) || activeEntry.path === entry.path;
-            const isDropTarget = entry.isDir && dropTargetPath === entry.path;
-            const isBeingDragged = draggedSet.has(entry.path);
-            return (
-              <div
-                key={entry.path}
-                data-entry-path={entry.path}
-                data-drop-path={entry.isDir ? entry.path : undefined}
-                data-drop-name={entry.isDir ? entry.name : undefined}
-                style={{ width: thumbBoxSize, height: thumbBoxSize }}
-                onMouseDown={(e) => onStartItemDrag(e, entry, entries)}
-                onDoubleClick={() => onOpenEntry(entry)}
-                onContextMenu={(e) => {
-                  e.stopPropagation();
-                  onContextMenu(e, entry);
-                }}
-                className={`p-2 rounded-xl flex flex-col items-center justify-center shrink-0 cursor-pointer ${
-                  isBeingDragged ? "opacity-45" : ""
-                } ${
-                  isDropTarget
-                    ? "bg-[#0a84ff]/35 ring-2 ring-[#0a84ff]"
-                    : isSelected
-                    ? darkMode
-                      ? "bg-white/15"
-                      : "bg-black/10"
-                    : "hover:bg-white/5 opacity-75 hover:opacity-100"
-                }`}
-              >
-                <FileIcon entry={entry} size={thumbIconSize} />
-                <span className="text-[10px] truncate w-full mt-1 text-center">
-                  {entry.name}
-                </span>
-              </div>
-            );
-          })}
+          {isLargeFilmstrip ? (
+            <div
+              className="relative shrink-0"
+              style={{
+                width: Math.max(0, entries.length * thumbPitch - 12),
+                height: thumbBoxSize,
+              }}
+            >
+              {renderedFilmstripItems.map(({ entry, index }) =>
+                renderFilmstripItem(entry, { left: index * thumbPitch, top: 0 }, "absolute")
+              )}
+            </div>
+          ) : (
+            entries.map((entry) => renderFilmstripItem(entry))
+          )}
         </div>
       </div>
 

@@ -41,52 +41,81 @@ const VIDEO_EXTENSIONS = new Set([
   "3gp",
 ]);
 
-// Module-level cache of resolved image thumbnail URLs keyed by `${path}::${modified}::${targetSize}`
+// Module-level bounded LRU cache of resolved image thumbnail URLs keyed by `${path}::${modified}::${targetSize}`
+const MAX_THUMBNAIL_CACHE_ENTRIES = 500;
 const THUMBNAIL_URL_CACHE = new Map<string, string>();
 const FAILED_THUMBNAILS = new Set<string>();
 const INFLIGHT_REQUESTS = new Map<string, Promise<string | null>>();
 
-// Concurrent queue for thumbnail generation
-const MAX_CONCURRENT = 2;
-let activeTasks = 0;
-const pendingQueue: Array<() => Promise<void>> = [];
-let queueTimer: number | null = null;
+function getCachedThumbnail(key: string): string | undefined {
+  const value = THUMBNAIL_URL_CACHE.get(key);
+  if (value !== undefined) {
+    THUMBNAIL_URL_CACHE.delete(key);
+    THUMBNAIL_URL_CACHE.set(key, value);
+  }
+  return value;
+}
+
+function setCachedThumbnail(key: string, url: string): void {
+  if (THUMBNAIL_URL_CACHE.has(key)) {
+    THUMBNAIL_URL_CACHE.delete(key);
+  }
+  THUMBNAIL_URL_CACHE.set(key, url);
+  while (THUMBNAIL_URL_CACHE.size > MAX_THUMBNAIL_CACHE_ENTRIES) {
+    const oldestKey = THUMBNAIL_URL_CACHE.keys().next().value;
+    if (oldestKey === undefined) break;
+    THUMBNAIL_URL_CACHE.delete(oldestKey);
+  }
+}
+
+// Separate concurrency queues so stalled video decodes never head-of-line block image thumbnails.
+const MAX_IMAGE_CONCURRENT = 4;
+const MAX_VIDEO_CONCURRENT = 1;
 let folderAnimEndTime = 0;
 
 export function markFolderAnimationActive(durationMs = 220) {
   folderAnimEndTime = Math.max(folderAnimEndTime, performance.now() + durationMs);
 }
 
-function scheduleQueueDrain() {
-  if (
-    queueTimer !== null ||
-    activeTasks >= MAX_CONCURRENT ||
-    pendingQueue.length === 0
-  ) {
-    return;
+function createThumbnailQueue(maxConcurrent: number) {
+  let activeTasks = 0;
+  const pendingQueue: Array<() => Promise<void>> = [];
+  let queueTimer: number | null = null;
+
+  function scheduleQueueDrain() {
+    if (
+      queueTimer !== null ||
+      activeTasks >= maxConcurrent ||
+      pendingQueue.length === 0
+    ) {
+      return;
+    }
+
+    // Let the explorer paint and handle input before dispatching more thumbnail work.
+    queueTimer = window.setTimeout(() => {
+      queueTimer = null;
+      while (activeTasks < maxConcurrent && pendingQueue.length > 0) {
+        const task = pendingQueue.shift();
+        if (!task) break;
+        activeTasks++;
+        void task()
+          .catch(() => {})
+          .finally(() => {
+            activeTasks--;
+            scheduleQueueDrain();
+          });
+      }
+    }, 16);
   }
 
-  // Let the explorer paint and handle input before dispatching more image work.
-  queueTimer = window.setTimeout(() => {
-    queueTimer = null;
-    const task = pendingQueue.shift();
-    if (!task || activeTasks >= MAX_CONCURRENT) return;
-
-    activeTasks++;
-    void task()
-      .catch(() => {})
-      .finally(() => {
-        activeTasks--;
-        scheduleQueueDrain();
-      });
+  return function enqueueTask(task: () => Promise<void>) {
+    pendingQueue.push(task);
     scheduleQueueDrain();
-  }, 16);
+  };
 }
 
-function enqueueTask(task: () => Promise<void>) {
-  pendingQueue.push(task);
-  scheduleQueueDrain();
-}
+const enqueueImageTask = createThumbnailQueue(MAX_IMAGE_CONCURRENT);
+const enqueueVideoTask = createThumbnailQueue(MAX_VIDEO_CONCURRENT);
 
 function createVideoThumbnail(
   path: string,
@@ -95,7 +124,7 @@ function createVideoThumbnail(
   return new Promise((resolve) => {
     const video = document.createElement("video");
     let settled = false;
-    const timeoutId = window.setTimeout(finish, 15000);
+    const timeoutId = window.setTimeout(finish, 5000);
 
     function finish(result: string | null = null) {
       if (settled) return;
@@ -169,6 +198,9 @@ function fetchThumbnail(
   isVideo: boolean,
   fileSize?: number
 ): Promise<string | null> {
+  const cached = getCachedThumbnail(cacheKey);
+  if (cached) return Promise.resolve(cached);
+
   const existing = INFLIGHT_REQUESTS.get(cacheKey);
   if (existing) return existing;
 
@@ -176,21 +208,22 @@ function fetchThumbnail(
   if (isSvg) {
     try {
       const url = convertFileSrc(path);
-      THUMBNAIL_URL_CACHE.set(cacheKey, url);
+      setCachedThumbnail(cacheKey, url);
       return Promise.resolve(url);
     } catch {
       return Promise.resolve(null);
     }
   }
 
+  const enqueue = isVideo ? enqueueVideoTask : enqueueImageTask;
   const promise = new Promise<string | null>((resolve) => {
-    enqueueTask(async () => {
+    enqueue(async () => {
       try {
         const videoThumbnail = isVideo
           ? await createVideoThumbnail(path, targetSize)
           : null;
         if (videoThumbnail) {
-          THUMBNAIL_URL_CACHE.set(cacheKey, videoThumbnail);
+          setCachedThumbnail(cacheKey, videoThumbnail);
           resolve(videoThumbnail);
           return;
         }
@@ -200,7 +233,7 @@ function fetchThumbnail(
         if (thumbPath) {
           try {
             const assetUrl = convertFileSrc(thumbPath);
-            THUMBNAIL_URL_CACHE.set(cacheKey, assetUrl);
+            setCachedThumbnail(cacheKey, assetUrl);
             resolve(assetUrl);
             return;
           } catch {
@@ -212,7 +245,7 @@ function fetchThumbnail(
           try {
             const preview = await apiReadFilePreview(path, 5 * 1024 * 1024);
             if (preview.dataUrl) {
-              THUMBNAIL_URL_CACHE.set(cacheKey, preview.dataUrl);
+              setCachedThumbnail(cacheKey, preview.dataUrl);
               resolve(preview.dataUrl);
               return;
             }
@@ -227,7 +260,7 @@ function fetchThumbnail(
           try {
             const preview = await apiReadFilePreview(path, 5 * 1024 * 1024);
             if (preview.dataUrl) {
-              THUMBNAIL_URL_CACHE.set(cacheKey, preview.dataUrl);
+              setCachedThumbnail(cacheKey, preview.dataUrl);
               resolve(preview.dataUrl);
               return;
             }
@@ -471,9 +504,12 @@ const ImageFileIcon: React.FC<{
       setImgSrc(null);
       return;
     }
-    const cached = THUMBNAIL_URL_CACHE.get(cacheKey);
+    const cached = getCachedThumbnail(cacheKey);
     if (cached) {
       setImgSrc(cached);
+      setImgFailed(false);
+    } else {
+      setImgSrc(null);
       setImgFailed(false);
     }
   }, [cacheKey]);
@@ -524,7 +560,7 @@ const ImageFileIcon: React.FC<{
       try {
         const preview = await apiReadFilePreview(entryPath, 5 * 1024 * 1024);
         if (preview.dataUrl) {
-          THUMBNAIL_URL_CACHE.set(cacheKey, preview.dataUrl);
+          setCachedThumbnail(cacheKey, preview.dataUrl);
           setImgSrc(preview.dataUrl);
           setImgFailed(false);
           return;

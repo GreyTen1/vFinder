@@ -14,9 +14,6 @@ static ACTIVE_DOWNLOADS: OnceLock<Mutex<HashMap<String, DownloadHandle>>> = Once
 
 struct DownloadHandle {
     cancel_flag: Arc<AtomicBool>,
-    child_pid: Option<u32>,
-    part_path: PathBuf,
-    hdr_path: PathBuf,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -74,15 +71,6 @@ pub fn cancel_download(id: &str) -> bool {
 
     if let Some(handle) = map.remove(id) {
         handle.cancel_flag.store(true, Ordering::SeqCst);
-        if let Some(pid) = handle.child_pid {
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
-        }
-        if handle.part_path.exists() {
-            let _ = fs::remove_file(&handle.part_path);
-        }
-        if handle.hdr_path.exists() {
-            let _ = fs::remove_file(&handle.hdr_path);
-        }
         true
     } else {
         false
@@ -220,23 +208,19 @@ pub fn start_download(app: AppHandle, args: StartDownloadArgs) {
             }
         };
 
-        let pid = child.id();
-
         // Register in active downloads
         if let Ok(mut map) = ACTIVE_DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new())).lock() {
             map.insert(
                 args.id.clone(),
                 DownloadHandle {
                     cancel_flag: cancel_flag.clone(),
-                    child_pid: Some(pid),
-                    part_path: part_path.clone(),
-                    hdr_path: hdr_path.clone(),
                 },
             );
         }
 
         let mut last_bytes = 0u64;
         let mut last_time = Instant::now();
+        let mut last_progress_emit: Option<Instant> = None;
         let mut current_speed = 0u64;
 
         loop {
@@ -260,6 +244,10 @@ pub fn start_download(app: AppHandle, args: StartDownloadArgs) {
                     }
                     if hdr_path.exists() {
                         let _ = fs::remove_file(&hdr_path);
+                    }
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        let _ = fs::remove_file(&part_path);
+                        return;
                     }
 
                     if status.success() && part_path.exists() {
@@ -345,18 +333,24 @@ pub fn start_download(app: AppHandle, args: StartDownloadArgs) {
                         0.0
                     };
 
-                    let _ = app.emit(
-                        "download-progress",
-                        DownloadProgressPayload {
-                            id: args.id.clone(),
-                            downloaded_bytes: current_bytes,
-                            total_bytes,
-                            speed: current_speed,
-                            percentage,
-                        },
-                    );
+                    let should_emit = last_progress_emit
+                        .map(|t| t.elapsed() >= Duration::from_millis(150))
+                        .unwrap_or(true);
+                    if should_emit {
+                        last_progress_emit = Some(now);
+                        let _ = app.emit(
+                            "download-progress",
+                            DownloadProgressPayload {
+                                id: args.id.clone(),
+                                downloaded_bytes: current_bytes,
+                                total_bytes,
+                                speed: current_speed,
+                                percentage,
+                            },
+                        );
+                    }
 
-                    std::thread::sleep(Duration::from_millis(200));
+                    std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
                     if let Ok(mut map) =

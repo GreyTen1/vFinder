@@ -373,6 +373,10 @@ export const DownloadsPopover: React.FC<DownloadsPopoverProps> = ({
 
   useEffect(() => {
     const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("[data-downloads-toggle]")) {
+        return;
+      }
       if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
         onClose();
       }

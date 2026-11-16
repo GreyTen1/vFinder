@@ -1,17 +1,70 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
+const MAX_CONCURRENT_CLIENTS: usize = 32;
+const MAX_HEADER_LINES: usize = 64;
+const MAX_HEADER_LINE_BYTES: u64 = 8192;
+
+static ACTIVE_CLIENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PENDING_DOWNLOADS_BY_WINDOW: OnceLock<Mutex<HashMap<String, Vec<InterceptedDownloadPayload>>>> = OnceLock::new();
 static WINDOW_COUNTER: AtomicU64 = AtomicU64::new(1);
 static INITIAL_DOWNLOAD_CLAIMED: AtomicBool = AtomicBool::new(false);
 static FILE_PREVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
 static DOWNLOAD_SERVER_PORT: AtomicU16 = AtomicU16::new(0);
 static FILE_PREVIEWS: OnceLock<Mutex<HashMap<String, (PathBuf, std::time::Instant)>>> = OnceLock::new();
+
+struct ClientConnectionGuard;
+
+impl ClientConnectionGuard {
+    fn try_acquire() -> Option<Self> {
+        let mut current = ACTIVE_CLIENT_COUNT.load(Ordering::Acquire);
+        loop {
+            if current >= MAX_CONCURRENT_CLIENTS {
+                return None;
+            }
+            match ACTIVE_CLIENT_COUNT.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+impl Drop for ClientConnectionGuard {
+    fn drop(&mut self) {
+        ACTIVE_CLIENT_COUNT.fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut String,
+    max_bytes: u64,
+) -> Result<bool, ()> {
+    buf.clear();
+    let bytes_read = reader
+        .by_ref()
+        .take(max_bytes)
+        .read_line(buf)
+        .map_err(|_| ())?;
+    if bytes_read == 0 {
+        return Ok(false);
+    }
+    if !buf.ends_with('\n') && (bytes_read as u64) >= max_bytes {
+        return Err(());
+    }
+    Ok(true)
+}
 
 pub fn register_file_preview(path: &Path) -> Result<String, String> {
     let canonical_path = path.canonicalize().map_err(|e| e.to_string())?;
@@ -248,13 +301,22 @@ pub fn start_download_server(app_handle: AppHandle) {
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => {
+                    let Some(guard) = ClientConnectionGuard::try_acquire() else {
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        continue;
+                    };
                     let app = app_handle.clone();
                     std::thread::spawn(move || {
+                        let _guard = guard;
                         handle_client(&mut stream, &app);
                     });
                 }
                 Err(e) => {
                     eprintln!("[download_server] Incoming connection error: {:?}", e);
+                    std::thread::sleep(Duration::from_millis(50));
                 }
             }
         }
@@ -271,8 +333,9 @@ fn handle_client(stream: &mut TcpStream, app: &AppHandle) {
     });
 
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
-        return;
+    match read_bounded_line(&mut reader, &mut request_line, MAX_HEADER_LINE_BYTES) {
+        Ok(true) if !request_line.is_empty() => {}
+        _ => return,
     }
 
     let parts: Vec<&str> = request_line.split_whitespace().collect();
@@ -285,19 +348,36 @@ fn handle_client(stream: &mut TcpStream, app: &AppHandle) {
 
     let mut content_length: usize = 0;
     let mut range_header: Option<String> = None;
+    let mut header_count = 0usize;
+    let mut header_line = String::new();
     loop {
-        let mut header_line = String::new();
-        if reader.read_line(&mut header_line).is_err() || header_line == "\r\n" || header_line == "\n" {
-            break;
+        if header_count >= MAX_HEADER_LINES {
+            let _ = stream.write_all(
+                b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return;
         }
-        let lower = header_line.to_lowercase();
-        if lower.starts_with("content-length:") {
-            if let Some(val_str) = lower.strip_prefix("content-length:") {
-                content_length = val_str.trim().parse::<usize>().unwrap_or(0);
+        match read_bounded_line(&mut reader, &mut header_line, MAX_HEADER_LINE_BYTES) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(()) => {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                return;
             }
         }
-        if lower.starts_with("range:") {
-            range_header = Some(header_line[6..].trim().to_string());
+        if header_line == "\r\n" || header_line == "\n" {
+            break;
+        }
+        header_count += 1;
+        if let Some((name, val)) = header_line.split_once(':') {
+            let name_trimmed = name.trim();
+            if name_trimmed.eq_ignore_ascii_case("content-length") {
+                content_length = val.trim().parse::<usize>().unwrap_or(0);
+            } else if name_trimmed.eq_ignore_ascii_case("range") {
+                range_header = Some(val.trim().to_string());
+            }
         }
     }
 
@@ -514,6 +594,7 @@ fn serve_file_preview(stream: &mut TcpStream, request_path: &str, head_only: boo
     if partial { headers.push_str(&format!("Content-Range: bytes {start}-{end}/{file_len}\r\n")); }
     headers.push_str("\r\n");
     if stream.write_all(headers.as_bytes()).is_err() || head_only { return; }
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(120)));
     let mut limited = file.take(length);
     let _ = std::io::copy(&mut limited, stream);
 }

@@ -1,10 +1,16 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, ChevronUp, RefreshCw, X } from "lucide-react";
 import { apiGetFilesByTag, apiOpenItem, apiReadDirectory } from "../api";
 import { FileEntry } from "../types";
 import type { SelectionModifiers } from "./Views";
 import { useMarqueeSelection } from "./Views";
 import { FileIcon } from "./FileIcon";
+
+const SPLIT_VIRTUALIZATION_THRESHOLD = 120;
+const SPLIT_CELL_WIDTH = 96;
+const SPLIT_CELL_HEIGHT = 88;
+const SPLIT_GRID_GAP = 4;
+const SPLIT_ROW_PITCH = SPLIT_CELL_HEIGHT + SPLIT_GRID_GAP;
 
 interface PaneLocation {
   path: string;
@@ -17,9 +23,12 @@ interface SplitExplorerPaneProps {
   initialTitle: string;
   initialTag?: string | null;
   darkMode: boolean;
+  showHidden: boolean;
   refreshVersion: number;
   panelWidthPercent: number;
   dropTargetPath: string | null;
+  getCachedEntries?: (path: string, showHidden: boolean) => FileEntry[] | undefined;
+  onCacheEntries?: (path: string, showHidden: boolean, entries: FileEntry[]) => void;
   onActivePane?: () => void;
   onStartItemDrag: (
     event: React.MouseEvent,
@@ -48,9 +57,12 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   initialTitle,
   initialTag,
   darkMode,
+  showHidden,
   refreshVersion,
   panelWidthPercent,
   dropTargetPath,
+  getCachedEntries,
+  onCacheEntries,
   onActivePane,
   onStartItemDrag,
   onClose,
@@ -76,7 +88,21 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
+  const isMountedRef = useRef(true);
+  const getCachedEntriesRef = useRef(getCachedEntries);
+  getCachedEntriesRef.current = getCachedEntries;
+  const onCacheEntriesRef = useRef(onCacheEntries);
+  onCacheEntriesRef.current = onCacheEntries;
+  const [gridViewport, setGridViewport] = useState({ width: 0, height: 0, top: 0 });
+  const gridScrollFrameRef = useRef<number | null>(null);
   const location = history[historyIndex] || history[0];
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     onLocationChange(location);
@@ -85,13 +111,24 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   useEffect(() => {
     let mounted = true;
     const requestId = ++requestIdRef.current;
-    setLoading(true);
+    const cached = !location.activeTag
+      ? getCachedEntriesRef.current?.(location.path, showHidden)
+      : undefined;
+    if (cached) {
+      setEntries(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     const readEntries = location.activeTag
       ? apiGetFilesByTag(location.activeTag)
-      : apiReadDirectory(location.path, false);
+      : apiReadDirectory(location.path, showHidden);
     void readEntries
       .then((result) => {
+        if (!location.activeTag) {
+          onCacheEntriesRef.current?.(location.path, showHidden, result);
+        }
         if (mounted && requestIdRef.current === requestId) setEntries(result);
       })
       .catch((reason) => {
@@ -110,7 +147,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
     return () => {
       mounted = false;
     };
-  }, [location.path, location.activeTag, refreshVersion, onSelectionChange]);
+  }, [location.path, location.activeTag, refreshVersion, showHidden, onSelectionChange]);
 
   const navigate = (entry: FileEntry) => {
     setHistory((prev) => [
@@ -152,19 +189,30 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
 
   const refresh = () => {
     setLoading(true);
+    setError(null);
     const requestId = ++requestIdRef.current;
     const readEntries = location.activeTag
       ? apiGetFilesByTag(location.activeTag)
-      : apiReadDirectory(location.path, false);
+      : apiReadDirectory(location.path, showHidden);
     void readEntries
       .then((result) => {
-        if (requestIdRef.current === requestId) setEntries(result);
+        if (!location.activeTag) {
+          onCacheEntriesRef.current?.(location.path, showHidden, result);
+        }
+        if (isMountedRef.current && requestIdRef.current === requestId) {
+          setEntries(result);
+        }
       })
       .catch((reason) => {
-        if (requestIdRef.current === requestId) setError(String(reason));
+        if (isMountedRef.current && requestIdRef.current === requestId) {
+          setEntries([]);
+          setError(String(reason));
+        }
       })
       .finally(() => {
-        if (requestIdRef.current === requestId) setLoading(false);
+        if (isMountedRef.current && requestIdRef.current === requestId) {
+          setLoading(false);
+        }
       });
   };
 
@@ -275,7 +323,17 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
       const el = containerRef.current?.querySelector<HTMLElement>(
         `[data-entry-path="${CSS.escape(targetEntry.path)}"]`
       );
-      el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      if (el) {
+        el.scrollIntoView({ block: "nearest", inline: "nearest" });
+      } else if (containerRef.current && list.length > SPLIT_VIRTUALIZATION_THRESHOLD) {
+        const container = containerRef.current;
+        const rowTop = 8 + Math.floor(targetIdx / cols) * SPLIT_ROW_PITCH;
+        if (rowTop < container.scrollTop) {
+          container.scrollTop = Math.max(0, rowTop - 8);
+        } else if (rowTop + SPLIT_CELL_HEIGHT > container.scrollTop + container.clientHeight) {
+          container.scrollTop = rowTop + SPLIT_CELL_HEIGHT + 8 - container.clientHeight;
+        }
+      }
       return targetEntry;
     },
     [setSelection]
@@ -285,6 +343,111 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
     onNavigateSelectionChange?.(navigateByKey);
     return () => onNavigateSelectionChange?.(null);
   }, [onNavigateSelectionChange, navigateByKey]);
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let throttleTimer: number | null = null;
+    let lastMeasureTime = 0;
+    const THROTTLE_MS = 80;
+
+    const getCols = (w: number) =>
+      Math.max(
+        1,
+        Math.floor((Math.max(0, w - 16) + SPLIT_GRID_GAP) / (SPLIT_CELL_WIDTH + SPLIT_GRID_GAP))
+      );
+    const getRows = (h: number) => Math.ceil(h / SPLIT_ROW_PITCH);
+
+    const applySize = () => {
+      lastMeasureTime = performance.now();
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      const top = container.scrollTop;
+      setGridViewport((current) => {
+        if (
+          current.width > 0 &&
+          getCols(current.width) === getCols(width) &&
+          getRows(current.height) === getRows(height) &&
+          current.top === top
+        ) {
+          return current;
+        }
+        return { width, height, top };
+      });
+    };
+
+    const scheduleUpdate = () => {
+      const elapsed = performance.now() - lastMeasureTime;
+      if (elapsed >= THROTTLE_MS) {
+        if (throttleTimer !== null) {
+          window.clearTimeout(throttleTimer);
+          throttleTimer = null;
+        }
+        applySize();
+      } else if (throttleTimer === null) {
+        throttleTimer = window.setTimeout(() => {
+          throttleTimer = null;
+          applySize();
+        }, THROTTLE_MS - elapsed);
+      }
+    };
+
+    applySize();
+    const observer = new ResizeObserver(scheduleUpdate);
+    observer.observe(container);
+    return () => {
+      if (throttleTimer !== null) {
+        window.clearTimeout(throttleTimer);
+      }
+      observer.disconnect();
+    };
+  }, []);
+
+  const handleGridScroll = useCallback(() => {
+    if (gridScrollFrameRef.current !== null) return;
+    gridScrollFrameRef.current = window.setTimeout(() => {
+      gridScrollFrameRef.current = null;
+      const container = containerRef.current;
+      if (!container) return;
+      setGridViewport((current) =>
+        current.top === container.scrollTop
+          ? current
+          : { ...current, top: container.scrollTop }
+      );
+    }, 16);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (gridScrollFrameRef.current !== null) {
+        window.clearTimeout(gridScrollFrameRef.current);
+      }
+    },
+    []
+  );
+
+  const isLargeGrid = entries.length > SPLIT_VIRTUALIZATION_THRESHOLD;
+  const contentWidth = Math.max(0, gridViewport.width - 16);
+  const rawColumnCount = Math.max(
+    1,
+    Math.floor((contentWidth + SPLIT_GRID_GAP) / (SPLIT_CELL_WIDTH + SPLIT_GRID_GAP))
+  );
+  const columnCount = isLargeGrid ? rawColumnCount : 1;
+  const rowCount = Math.ceil(entries.length / columnCount);
+  const firstVisibleRow = isLargeGrid
+    ? Math.max(0, Math.floor((gridViewport.top - 8) / SPLIT_ROW_PITCH) - 3)
+    : 0;
+  const lastVisibleRow = isLargeGrid
+    ? Math.min(
+        rowCount,
+        Math.ceil((gridViewport.top + gridViewport.height - 8) / SPLIT_ROW_PITCH) + 4
+      )
+    : rowCount;
+  const firstVisibleIndex = firstVisibleRow * columnCount;
+  const lastVisibleIndex = Math.min(entries.length, lastVisibleRow * columnCount);
+  const renderedEntries = isLargeGrid
+    ? entries.slice(firstVisibleIndex, lastVisibleIndex)
+    : entries;
+
   const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
     containerRef,
     selectedPaths,
@@ -369,6 +532,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
 
       <div
         ref={containerRef}
+        onScroll={handleGridScroll}
         onMouseDown={handleContainerMouseDown}
         onContextMenu={(e) =>
           onContextMenu?.(e, undefined, location.activeTag ? undefined : location.path)
@@ -388,8 +552,33 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
             This folder is empty
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,96px)] justify-start gap-1">
-            {entries.map((entry) => {
+          <div
+            className={
+              isLargeGrid
+                ? "grid justify-start gap-1"
+                : "grid grid-cols-[repeat(auto-fill,96px)] justify-start gap-1"
+            }
+            style={
+              isLargeGrid
+                ? {
+                    gridTemplateColumns:
+                      gridViewport.width > 0
+                        ? `repeat(${rawColumnCount}, ${SPLIT_CELL_WIDTH}px)`
+                        : `repeat(auto-fill, ${SPLIT_CELL_WIDTH}px)`,
+                    gridAutoRows: `${SPLIT_CELL_HEIGHT}px`,
+                    minHeight:
+                      rowCount > 0
+                        ? rowCount * SPLIT_ROW_PITCH - SPLIT_GRID_GAP
+                        : undefined,
+                    alignContent: "start",
+                  }
+                : undefined
+            }
+          >
+            {renderedEntries.map((entry, visibleIndex) => {
+              const index = isLargeGrid
+                ? firstVisibleIndex + visibleIndex
+                : visibleIndex;
               const selected = selectedPaths.includes(entry.path);
               return (
                 <div
@@ -400,6 +589,14 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
                   data-drag-handle="true"
                   data-drop-path={entry.isDir ? entry.path : undefined}
                   data-drop-name={entry.isDir ? entry.name : undefined}
+                  style={
+                    isLargeGrid
+                      ? {
+                          gridColumn: (index % columnCount) + 1,
+                          gridRow: Math.floor(index / columnCount) + 1,
+                        }
+                      : undefined
+                  }
                   onMouseDown={(event) => {
                     const modifiers = {
                       ctrlKey: event.ctrlKey,

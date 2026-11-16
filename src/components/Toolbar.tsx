@@ -957,6 +957,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             <div className="relative">
               <button
                 type="button"
+                data-downloads-toggle="true"
                 onClick={onToggleDownloads}
                 title="Downloads Manager"
                 className={`p-1.5 rounded-md transition relative ${btnBase} ${
