@@ -42,7 +42,7 @@ const VIDEO_EXTENSIONS = new Set([
 ]);
 
 // Module-level bounded LRU cache of resolved image thumbnail URLs keyed by `${path}::${modified}::${targetSize}`
-const MAX_THUMBNAIL_CACHE_ENTRIES = 500;
+const MAX_THUMBNAIL_CACHE_ENTRIES = 4000;
 const THUMBNAIL_URL_CACHE = new Map<string, string>();
 const FAILED_THUMBNAILS = new Set<string>();
 const INFLIGHT_REQUESTS = new Map<string, Promise<string | null>>();
@@ -69,7 +69,7 @@ function setCachedThumbnail(key: string, url: string): void {
 }
 
 // Separate concurrency queues so stalled video decodes never head-of-line block image thumbnails.
-const MAX_IMAGE_CONCURRENT = 4;
+const MAX_IMAGE_CONCURRENT = 6;
 const MAX_VIDEO_CONCURRENT = 1;
 let folderAnimEndTime = 0;
 
@@ -80,32 +80,36 @@ export function markFolderAnimationActive(durationMs = 220) {
 function createThumbnailQueue(maxConcurrent: number) {
   let activeTasks = 0;
   const pendingQueue: Array<() => Promise<void>> = [];
-  let queueTimer: number | null = null;
+  let drainScheduled = false;
+
+  function drainQueue() {
+    while (activeTasks < maxConcurrent && pendingQueue.length > 0) {
+      const task = pendingQueue.shift();
+      if (!task) break;
+      activeTasks++;
+      void task()
+        .catch(() => {})
+        .finally(() => {
+          activeTasks--;
+          scheduleQueueDrain();
+        });
+    }
+  }
 
   function scheduleQueueDrain() {
     if (
-      queueTimer !== null ||
+      drainScheduled ||
       activeTasks >= maxConcurrent ||
       pendingQueue.length === 0
     ) {
       return;
     }
 
-    // Let the explorer paint and handle input before dispatching more thumbnail work.
-    queueTimer = window.setTimeout(() => {
-      queueTimer = null;
-      while (activeTasks < maxConcurrent && pendingQueue.length > 0) {
-        const task = pendingQueue.shift();
-        if (!task) break;
-        activeTasks++;
-        void task()
-          .catch(() => {})
-          .finally(() => {
-            activeTasks--;
-            scheduleQueueDrain();
-          });
-      }
-    }, 16);
+    drainScheduled = true;
+    queueMicrotask(() => {
+      drainScheduled = false;
+      drainQueue();
+    });
   }
 
   return function enqueueTask(task: () => Promise<void>) {
@@ -302,7 +306,7 @@ function observeThumbnailElement(el: Element, onVisible: () => void): () => void
           }
         }
       },
-      { rootMargin: "80px" }
+      { rootMargin: "450px" }
     );
   }
   observerCallbacks.set(el, onVisible);
@@ -385,30 +389,11 @@ function renderDocumentIcon(
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >
-        <defs>
-          <linearGradient id="macos-doc-page" x1="32" y1="6" x2="32" y2="58" gradientUnits="userSpaceOnUse">
-            <stop stopColor="#FFFFFF" />
-            <stop offset="1" stopColor="#EEF1F5" />
-          </linearGradient>
-          <linearGradient id="archive-zipper-metal" x1="27" y1="32" x2="37" y2="40" gradientUnits="userSpaceOnUse">
-            <stop stopColor="#F8FAFC" />
-            <stop offset=".45" stopColor="#AEB5BF" />
-            <stop offset="1" stopColor="#747B86" />
-          </linearGradient>
-          <linearGradient id="archive-fold" x1="39" y1="7" x2="47" y2="16" gradientUnits="userSpaceOnUse">
-            <stop stopColor="#E9EDF2" />
-            <stop offset="1" stopColor="#D3D9E1" />
-          </linearGradient>
-          <filter id="archive-page-shadow" x="9" y="4" width="47" height="59" colorInterpolationFilters="sRGB" filterUnits="userSpaceOnUse">
-            <feGaussianBlur stdDeviation="1.3" />
-          </filter>
-        </defs>
         {isArchive && (
           <path
-            d="M14 11C14 8.23858 16.2386 6 19 6H38.5L50 17.5V53C50 55.7614 47.7614 58 45 58H19C16.2386 58 14 55.7614 14 53V11Z"
-            fill="#64748B"
-            opacity=".18"
-            filter="url(#archive-page-shadow)"
+            d="M14 12.5C14 9.73858 16.2386 7.5 19 7.5H38.5L50 19V54.5C50 57.2614 47.7614 59.5 45 59.5H19C16.2386 59.5 14 57.2614 14 54.5V12.5Z"
+            fill="#000000"
+            fillOpacity="0.16"
           />
         )}
         {/* Document Page with Folded Corner */}
@@ -585,11 +570,9 @@ const ImageFileIcon: React.FC<{
           <img
             src={effectiveSrc}
             alt={entry.name}
-            loading="lazy"
             decoding="async"
             draggable={false}
             onError={handleImgError}
-            style={{ filter: "drop-shadow(0 2px 5px rgba(0, 0, 0, 0.55))" }}
             className="w-full h-full object-cover shadow-md pointer-events-none"
           />
         ) : (
@@ -597,11 +580,9 @@ const ImageFileIcon: React.FC<{
             <img
               src={effectiveSrc}
               alt={entry.name}
-              loading="lazy"
               decoding="async"
               draggable={false}
               onError={handleImgError}
-              style={{ filter: "drop-shadow(0 3px 7px rgba(0, 0, 0, 0.6))" }}
               className="max-w-full max-h-full object-contain shadow-lg pointer-events-none"
             />
           </div>

@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { ChevronLeft, ChevronRight, ChevronUp, RefreshCw, X } from "lucide-react";
 import { apiGetFilesByTag, apiOpenItem, apiReadDirectory } from "../api";
 import { FileEntry } from "../types";
-import type { SelectionModifiers } from "./Views";
-import { useMarqueeSelection } from "./Views";
+import type { MarqueeRect, ScrollFrameHandle, SelectionModifiers } from "./Views";
+import { cancelScrollUpdate, scheduleScrollUpdate, useMarqueeSelection } from "./Views";
 import { FileIcon } from "./FileIcon";
 
 const SPLIT_VIRTUALIZATION_THRESHOLD = 120;
@@ -94,7 +94,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   const onCacheEntriesRef = useRef(onCacheEntries);
   onCacheEntriesRef.current = onCacheEntries;
   const [gridViewport, setGridViewport] = useState({ width: 0, height: 0, top: 0 });
-  const gridScrollFrameRef = useRef<number | null>(null);
+  const gridScrollFrameRef = useRef<ScrollFrameHandle | null>(null);
   const location = history[historyIndex] || history[0];
 
   useEffect(() => {
@@ -404,7 +404,7 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
 
   const handleGridScroll = useCallback(() => {
     if (gridScrollFrameRef.current !== null) return;
-    gridScrollFrameRef.current = window.setTimeout(() => {
+    gridScrollFrameRef.current = scheduleScrollUpdate(() => {
       gridScrollFrameRef.current = null;
       const container = containerRef.current;
       if (!container) return;
@@ -413,14 +413,13 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
           ? current
           : { ...current, top: container.scrollTop }
       );
-    }, 16);
+    });
   }, []);
 
   useEffect(
     () => () => {
-      if (gridScrollFrameRef.current !== null) {
-        window.clearTimeout(gridScrollFrameRef.current);
-      }
+      cancelScrollUpdate(gridScrollFrameRef.current);
+      gridScrollFrameRef.current = null;
     },
     []
   );
@@ -434,12 +433,12 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
   const columnCount = isLargeGrid ? rawColumnCount : 1;
   const rowCount = Math.ceil(entries.length / columnCount);
   const firstVisibleRow = isLargeGrid
-    ? Math.max(0, Math.floor((gridViewport.top - 8) / SPLIT_ROW_PITCH) - 3)
+    ? Math.max(0, Math.floor((gridViewport.top - 8) / SPLIT_ROW_PITCH) - 8)
     : 0;
   const lastVisibleRow = isLargeGrid
     ? Math.min(
         rowCount,
-        Math.ceil((gridViewport.top + gridViewport.height - 8) / SPLIT_ROW_PITCH) + 4
+        Math.ceil((gridViewport.top + gridViewport.height - 8) / SPLIT_ROW_PITCH) + 8
       )
     : rowCount;
   const firstVisibleIndex = firstVisibleRow * columnCount;
@@ -448,11 +447,50 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
     ? entries.slice(firstVisibleIndex, lastVisibleIndex)
     : entries;
 
+  const getSplitMarqueeHits = useCallback(
+    (rect: MarqueeRect, container: HTMLDivElement): string[] | null => {
+      const list = entriesRef.current;
+      if (list.length <= SPLIT_VIRTUALIZATION_THRESHOLD) return null;
+      if (list.length === 0) return [];
+      const cWidth = Math.max(0, container.clientWidth - 16);
+      const cols = Math.max(
+        1,
+        Math.floor((cWidth + SPLIT_GRID_GAP) / (SPLIT_CELL_WIDTH + SPLIT_GRID_GAP))
+      );
+      const totalRows = Math.ceil(list.length / cols);
+      const boxRight = rect.left + rect.width;
+      const boxBottom = rect.top + rect.height;
+      const minRow = Math.max(0, Math.floor((rect.top - 8) / SPLIT_ROW_PITCH));
+      const maxRow = Math.min(
+        totalRows - 1,
+        Math.floor((boxBottom - 8) / SPLIT_ROW_PITCH)
+      );
+      const hits: string[] = [];
+      for (let r = minRow; r <= maxRow; r++) {
+        const itemTop = 8 + r * SPLIT_ROW_PITCH;
+        const itemBottom = itemTop + SPLIT_CELL_HEIGHT;
+        if (itemTop >= boxBottom || itemBottom <= rect.top) continue;
+        for (let c = 0; c < cols; c++) {
+          const idx = r * cols + c;
+          if (idx >= list.length) break;
+          const itemLeft = 8 + c * (SPLIT_CELL_WIDTH + SPLIT_GRID_GAP);
+          const itemRight = itemLeft + SPLIT_CELL_WIDTH;
+          if (itemLeft < boxRight && itemRight > rect.left) {
+            hits.push(list[idx].path);
+          }
+        }
+      }
+      return hits;
+    },
+    []
+  );
+
   const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
     containerRef,
     selectedPaths,
     onSetSelection: setSelection,
     onClearSelection: clearSelection,
+    getHitPaths: getSplitMarqueeHits,
   });
 
   const buttonClass = darkMode
@@ -555,22 +593,16 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
           <div
             className={
               isLargeGrid
-                ? "grid justify-start gap-1"
+                ? "relative w-full"
                 : "grid grid-cols-[repeat(auto-fill,96px)] justify-start gap-1"
             }
             style={
               isLargeGrid
                 ? {
-                    gridTemplateColumns:
-                      gridViewport.width > 0
-                        ? `repeat(${rawColumnCount}, ${SPLIT_CELL_WIDTH}px)`
-                        : `repeat(auto-fill, ${SPLIT_CELL_WIDTH}px)`,
-                    gridAutoRows: `${SPLIT_CELL_HEIGHT}px`,
-                    minHeight:
-                      rowCount > 0
-                        ? rowCount * SPLIT_ROW_PITCH - SPLIT_GRID_GAP
-                        : undefined,
-                    alignContent: "start",
+                    height: Math.max(
+                      SPLIT_CELL_HEIGHT,
+                      rowCount * SPLIT_ROW_PITCH - SPLIT_GRID_GAP
+                    ),
                   }
                 : undefined
             }
@@ -592,8 +624,12 @@ export const SplitExplorerPane: React.FC<SplitExplorerPaneProps> = ({
                   style={
                     isLargeGrid
                       ? {
-                          gridColumn: (index % columnCount) + 1,
-                          gridRow: Math.floor(index / columnCount) + 1,
+                          position: "absolute",
+                          left: (index % columnCount) * (SPLIT_CELL_WIDTH + SPLIT_GRID_GAP),
+                          top: Math.floor(index / columnCount) * SPLIT_ROW_PITCH,
+                          width: SPLIT_CELL_WIDTH,
+                          minHeight: SPLIT_CELL_HEIGHT,
+                          zIndex: selected ? 20 : 1,
                         }
                       : undefined
                   }

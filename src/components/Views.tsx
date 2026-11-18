@@ -94,11 +94,32 @@ export interface CommonViewProps {
   onQuickLook: () => void;
 }
 
-interface MarqueeRect {
+export interface MarqueeRect {
   left: number;
   top: number;
   width: number;
   height: number;
+}
+
+export interface ScrollFrameHandle {
+  id: number;
+  isTimeout: boolean;
+}
+
+export function scheduleScrollUpdate(cb: () => void): ScrollFrameHandle {
+  if (typeof document !== "undefined" && document.hidden) {
+    return { id: window.setTimeout(cb, 16), isTimeout: true };
+  }
+  return { id: requestAnimationFrame(cb), isTimeout: false };
+}
+
+export function cancelScrollUpdate(handle: ScrollFrameHandle | null): void {
+  if (!handle) return;
+  if (handle.isTimeout) {
+    window.clearTimeout(handle.id);
+  } else {
+    cancelAnimationFrame(handle.id);
+  }
 }
 
 interface CachedMarqueeItem {
@@ -119,6 +140,7 @@ export function useMarqueeSelection({
   onSetSelection,
   onClearSelection,
   onClickEntryFallback,
+  getHitPaths,
 }: {
   containerRef: React.RefObject<HTMLDivElement | null>;
   selectedPaths: string[];
@@ -128,6 +150,7 @@ export function useMarqueeSelection({
     path: string,
     modifiers: SelectionModifiers
   ) => void;
+  getHitPaths?: (rect: MarqueeRect, container: HTMLDivElement) => string[] | null;
 }) {
   const [marqueeRect, setMarqueeRect] = useState<MarqueeRect | null>(null);
   const selectedPathsRef = useRef(selectedPaths);
@@ -141,6 +164,9 @@ export function useMarqueeSelection({
 
   const onClickEntryFallbackRef = useRef(onClickEntryFallback);
   onClickEntryFallbackRef.current = onClickEntryFallback;
+
+  const getHitPathsRef = useRef(getHitPaths);
+  getHitPathsRef.current = getHitPaths;
 
   const cleanupDragRef = useRef<(() => void) | null>(null);
   useEffect(() => () => cleanupDragRef.current?.(), []);
@@ -251,10 +277,6 @@ export function useMarqueeSelection({
       const c = containerRef.current;
       if (!c) return;
       const cRect = premeasuredRect ?? c.getBoundingClientRect();
-      if (!cachedItems) {
-        cachedItems = new Map();
-        appendMissingCachedItems(c, cachedItems, cRect);
-      }
       const curScrollX = Math.max(
         0,
         Math.min(c.scrollWidth, c.scrollLeft + (clientX - cRect.left))
@@ -271,15 +293,25 @@ export function useMarqueeSelection({
 
       setMarqueeRect({ left, top, width, height });
 
-      const hitPaths: string[] = [];
-      for (const item of cachedItems.values()) {
-        if (
-          item.left < left + width &&
-          item.right > left &&
-          item.top < top + height &&
-          item.bottom > top
-        ) {
-          hitPaths.push(item.path);
+      const customHits = getHitPathsRef.current?.({ left, top, width, height }, c) ?? null;
+      let hitPaths: string[];
+      if (customHits !== null) {
+        hitPaths = customHits;
+      } else {
+        if (!cachedItems) {
+          cachedItems = new Map();
+          appendMissingCachedItems(c, cachedItems, cRect);
+        }
+        hitPaths = [];
+        for (const item of cachedItems.values()) {
+          if (
+            item.left < left + width &&
+            item.right > left &&
+            item.top < top + height &&
+            item.bottom > top
+          ) {
+            hitPaths.push(item.path);
+          }
         }
       }
 
@@ -337,10 +369,9 @@ export function useMarqueeSelection({
       }
 
       if (scrolled) {
-        if (!cachedItems) {
-          cachedItems = new Map();
+        if (cachedItems) {
+          appendMissingCachedItems(c, cachedItems, cRect);
         }
-        appendMissingCachedItems(c, cachedItems, cRect);
         updateMarquee(lastClientX, lastClientY, cRect);
       }
       autoScrollFrame = requestAnimationFrame(tickAutoScroll);
@@ -448,6 +479,7 @@ const LIST_VIRTUALIZATION_THRESHOLD = 100;
 interface IconViewItemProps {
   entry: FileEntry;
   isSelected: boolean;
+  showFullName: boolean;
   isRenaming: boolean;
   isDropTarget: boolean;
   isBeingDragged: boolean;
@@ -468,6 +500,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
   ({
     entry,
     isSelected,
+    showFullName,
     isRenaming,
     isDropTarget,
     isBeingDragged,
@@ -484,7 +517,7 @@ const IconViewItem = React.memo<IconViewItemProps>(
     onRenameCancel,
   }) => {
     const maxW = Math.max(96, iconSize + 44);
-    const showFullName = isSelected;
+    const itemHeight = iconSize + 53;
     return (
       <div
         data-entry-path={entry.path}
@@ -500,9 +533,11 @@ const IconViewItem = React.memo<IconViewItemProps>(
         }}
         style={{
           maxWidth: maxW,
+          height: itemHeight,
+          zIndex: showFullName || isRenaming ? 20 : 1,
           ...virtualStyle,
         }}
-        className={`group flex flex-col items-center p-1.5 rounded-xl cursor-default w-full min-w-0 ${
+        className={`group relative overflow-visible flex flex-col items-center p-1.5 rounded-xl cursor-default w-full min-w-0 ${
           entry.isHidden ? "opacity-55" : ""
         } ${isBeingDragged ? "opacity-45" : ""} ${
           isDropTarget ? "ring-2 ring-[#0a84ff] bg-[#0a84ff]/20" : ""
@@ -572,12 +607,16 @@ const IconViewItem = React.memo<IconViewItemProps>(
             onClick={(e) => e.stopPropagation()}
             className={`mt-1.5 px-2 py-0.5 rounded-md text-[12px] leading-tight max-w-full flex gap-1 ${
               showFullName
-                ? "w-full flex-col items-center justify-center"
+                ? "w-full flex-col items-center justify-center shadow-md"
                 : "items-center justify-center text-center"
             } ${
               isDropTarget || isSelected
                 ? isDropTarget
                   ? "bg-[#0a84ff]/25 text-white font-medium"
+                  : showFullName
+                  ? darkMode
+                    ? "bg-[#383840] text-white font-medium"
+                    : "bg-[#dcdce2] text-zinc-900 font-medium"
                   : darkMode
                   ? "bg-white/15 text-white font-medium"
                   : "bg-black/10 text-zinc-900 font-medium"
@@ -622,7 +661,7 @@ export const IconView: React.FC<CommonViewProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [gridViewport, setGridViewport] = useState({ width: 0, height: 0, top: 0 });
-  const gridScrollFrameRef = useRef<number | null>(null);
+  const gridScrollFrameRef = useRef<ScrollFrameHandle | null>(null);
   const cellWidth = Math.max(96, iconSize + 44);
   const itemHeight = iconSize + 53;
   const rowPitch = itemHeight + 20;
@@ -633,9 +672,11 @@ export const IconView: React.FC<CommonViewProps> = ({
 
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
   const draggedSet = useMemo(() => new Set(draggedPaths), [draggedPaths]);
+  const [marqueeSelectionKey, setMarqueeSelectionKey] = useState<string | null>(null);
 
   const handleStartDragBound = useCallback(
     (e: React.MouseEvent, entry: FileEntry) => {
+      setMarqueeSelectionKey(null);
       onStartItemDrag(e, entry, entriesRef.current);
     },
     [onStartItemDrag]
@@ -643,6 +684,7 @@ export const IconView: React.FC<CommonViewProps> = ({
 
   const handleClickEntryByPath = useCallback(
     (path: string, modifiers: SelectionModifiers) => {
+      setMarqueeSelectionKey(null);
       const found = entriesRef.current.find((e) => e.path === path);
       if (found) {
         onSelect(found, modifiers, entriesRef.current);
@@ -651,12 +693,61 @@ export const IconView: React.FC<CommonViewProps> = ({
     [onSelect]
   );
 
+  const handleMarqueeSetSelection = useCallback(
+    (paths: string[]) => {
+      setMarqueeSelectionKey(paths.length > 0 ? paths.join("\0") : null);
+      onSetSelection(paths);
+    },
+    [onSetSelection]
+  );
+
+  const handleMarqueeClearSelection = useCallback(() => {
+    setMarqueeSelectionKey(null);
+    onClearSelection();
+  }, [onClearSelection]);
+
+  const getIconMarqueeHits = useCallback(
+    (rect: MarqueeRect, container: HTMLDivElement): string[] | null => {
+      const list = entriesRef.current;
+      if (list.length <= ICON_VIRTUALIZATION_THRESHOLD) return null;
+      if (list.length === 0) return [];
+      const cWidth = Math.max(0, container.clientWidth - 40);
+      const cols = Math.max(1, Math.floor((cWidth + 12) / (cellWidth + 12)));
+      const totalRows = Math.ceil(list.length / cols);
+      const boxRight = rect.left + rect.width;
+      const boxBottom = rect.top + rect.height;
+      const minRow = Math.max(0, Math.floor((rect.top - 20) / rowPitch));
+      const maxRow = Math.min(
+        totalRows - 1,
+        Math.floor((boxBottom - 20) / rowPitch)
+      );
+      const hits: string[] = [];
+      for (let r = minRow; r <= maxRow; r++) {
+        const itemTop = 20 + r * rowPitch;
+        const itemBottom = itemTop + itemHeight;
+        if (itemTop >= boxBottom || itemBottom <= rect.top) continue;
+        for (let c = 0; c < cols; c++) {
+          const idx = r * cols + c;
+          if (idx >= list.length) break;
+          const itemLeft = 20 + c * (cellWidth + 12);
+          const itemRight = itemLeft + cellWidth;
+          if (itemLeft < boxRight && itemRight > rect.left) {
+            hits.push(list[idx].path);
+          }
+        }
+      }
+      return hits;
+    },
+    [cellWidth, itemHeight, rowPitch]
+  );
+
   const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
     containerRef,
     selectedPaths,
-    onSetSelection,
-    onClearSelection,
+    onSetSelection: handleMarqueeSetSelection,
+    onClearSelection: handleMarqueeClearSelection,
     onClickEntryFallback: handleClickEntryByPath,
+    getHitPaths: getIconMarqueeHits,
   });
 
   useLayoutEffect(() => {
@@ -742,10 +833,9 @@ export const IconView: React.FC<CommonViewProps> = ({
       );
     }
     if (gridScrollFrameRef.current !== null) return;
-    // Keep icon virtualization responsive while the native window is hidden.
-    // WebKitGTK can suspend requestAnimationFrame in that state, but file
-    // manager reveal requests need scrolling to materialize their target first.
-    gridScrollFrameRef.current = window.setTimeout(() => {
+    // Keep icon virtualization locked to VSync when visible, falling back to
+    // timer scheduling while the native window is hidden for file reveals.
+    gridScrollFrameRef.current = scheduleScrollUpdate(() => {
       gridScrollFrameRef.current = null;
       const el = containerRef.current;
       if (!el) return;
@@ -754,14 +844,13 @@ export const IconView: React.FC<CommonViewProps> = ({
           ? current
           : { ...current, top: el.scrollTop }
       );
-    }, 16);
+    });
   }, []);
 
   useEffect(
     () => () => {
-      if (gridScrollFrameRef.current !== null) {
-        window.clearTimeout(gridScrollFrameRef.current);
-      }
+      cancelScrollUpdate(gridScrollFrameRef.current);
+      gridScrollFrameRef.current = null;
     },
     []
   );
@@ -789,12 +878,12 @@ export const IconView: React.FC<CommonViewProps> = ({
     : Math.min(Math.max(1, entries.length), rawColumnCount);
   const rowCount = Math.ceil(entries.length / columnCount);
   const firstVisibleRow = isLargeGrid
-    ? Math.max(0, Math.floor((effectiveTop - 20) / rowPitch) - 3)
+    ? Math.max(0, Math.floor((effectiveTop - 20) / rowPitch) - 8)
     : 0;
   const lastVisibleRow = isLargeGrid
     ? Math.min(
         rowCount,
-        Math.ceil((effectiveTop + effectiveHeight - 20) / rowPitch) + 4
+        Math.ceil((effectiveTop + effectiveHeight - 20) / rowPitch) + 8
       )
     : rowCount;
   const firstVisibleIndex = firstVisibleRow * columnCount;
@@ -832,50 +921,69 @@ export const IconView: React.FC<CommonViewProps> = ({
         </div>
       ) : (
         <div
-          className="grid gap-y-5 gap-x-3 justify-start justify-items-center"
-          style={{
-            gridTemplateColumns:
-              effectiveWidth > 0
-                ? `repeat(${displayColumnCount}, ${cellWidth}px)`
-                : `repeat(auto-fill, ${cellWidth}px)`,
-            ...(isLargeGrid
+          className={
+            isLargeGrid
+              ? "relative w-full"
+              : "grid gap-y-5 gap-x-3 justify-start justify-items-center"
+          }
+          style={
+            isLargeGrid
               ? {
-                  gridTemplateRows: `repeat(${Math.max(1, rowCount)}, ${itemHeight}px)`,
+                  height: Math.max(itemHeight, rowCount * rowPitch - 20),
+                }
+              : {
+                  gridTemplateColumns:
+                    effectiveWidth > 0
+                      ? `repeat(${displayColumnCount}, ${cellWidth}px)`
+                      : `repeat(auto-fill, ${cellWidth}px)`,
                   gridAutoRows: `${itemHeight}px`,
                 }
-              : {}),
-          }}
+          }
         >
-          {renderedItems.map(({ entry, index }) => {
-            return (
-              <IconViewItem
-                key={entry.path}
-                entry={entry}
-                isSelected={selectedSet.has(entry.path)}
-                isRenaming={renamingPath === entry.path}
-                isDropTarget={entry.isDir && dropTargetPath === entry.path}
-                isBeingDragged={draggedSet.has(entry.path)}
-                darkMode={darkMode}
-                iconSize={iconSize}
-                renameValue={renameValue}
-                virtualStyle={
-                  isLargeGrid
-                    ? {
-                        gridColumn: (index % columnCount) + 1,
-                        gridRow: Math.floor(index / columnCount) + 1,
-                      }
-                    : undefined
-                }
-                onOpenEntry={onOpenEntry}
-                onContextMenu={onContextMenu}
-                onStartItemDrag={handleStartDragBound}
-                onRenameChange={onRenameChange}
-                onStartRename={onStartRename}
-                onRenameSubmit={onRenameSubmit}
-                onRenameCancel={onRenameCancel}
-              />
-            );
-          })}
+          {(() => {
+            const isSingleSelection =
+              !marqueeRect &&
+              selectedPaths.length === 1 &&
+              selectedPaths[0] !== marqueeSelectionKey;
+            return renderedItems.map(({ entry, index }) => {
+              const isSelected = selectedSet.has(entry.path);
+              const showFullName = isSingleSelection && isSelected;
+              return (
+                <IconViewItem
+                  key={entry.path}
+                  entry={entry}
+                  isSelected={isSelected}
+                  showFullName={showFullName}
+                  isRenaming={renamingPath === entry.path}
+                  isDropTarget={entry.isDir && dropTargetPath === entry.path}
+                  isBeingDragged={draggedSet.has(entry.path)}
+                  darkMode={darkMode}
+                  iconSize={iconSize}
+                  renameValue={renameValue}
+                  virtualStyle={
+                    isLargeGrid
+                      ? {
+                          position: "absolute",
+                          left: (index % columnCount) * (cellWidth + 12),
+                          top: Math.floor(index / columnCount) * rowPitch,
+                          width: cellWidth,
+                          height: itemHeight,
+                          zIndex:
+                            showFullName || renamingPath === entry.path ? 20 : 1,
+                        }
+                      : undefined
+                  }
+                  onOpenEntry={onOpenEntry}
+                  onContextMenu={onContextMenu}
+                  onStartItemDrag={handleStartDragBound}
+                  onRenameChange={onRenameChange}
+                  onStartRename={onStartRename}
+                  onRenameSubmit={onRenameSubmit}
+                  onRenameCancel={onRenameCancel}
+                />
+              );
+            });
+          })()}
         </div>
       )}
 
@@ -1180,7 +1288,7 @@ export const ListView: React.FC<CommonViewProps> = ({
   const [dirCache, setDirCache] = useState<Record<string, FileEntry[]>>({});
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(600);
-  const scrollFrameRef = useRef<number | null>(null);
+  const scrollFrameRef = useRef<ScrollFrameHandle | null>(null);
 
   const currentFolderKey = entries[0]?.path
     ? entries[0].path.slice(0, Math.max(1, entries[0].path.lastIndexOf("/")))
@@ -1382,45 +1490,21 @@ export const ListView: React.FC<CommonViewProps> = ({
       setScrollTop(container.scrollTop);
     }
     if (scrollFrameRef.current !== null) return;
-    scrollFrameRef.current = window.setTimeout(() => {
+    scrollFrameRef.current = scheduleScrollUpdate(() => {
       scrollFrameRef.current = null;
       setScrollTop(containerRef.current?.scrollTop || 0);
-    }, 16);
+    });
   }, [isLargeList, revealPath]);
-
-  const handleListWheel = useCallback(
-    (event: React.WheelEvent<HTMLDivElement>) => {
-      if (!isLargeList || event.ctrlKey || event.metaKey) return;
-      if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
-
-      const container = containerRef.current;
-      if (!container) return;
-
-      const deltaScale =
-        event.deltaMode === WheelEvent.DOM_DELTA_LINE
-          ? rowHeight
-          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-          ? container.clientHeight
-          : 1;
-      const rawDelta = event.deltaY * deltaScale;
-      const limitedDelta = Math.sign(rawDelta) * Math.min(Math.abs(rawDelta) * 0.65, 42);
-
-      event.preventDefault();
-      container.scrollTop += limitedDelta;
-    },
-    [isLargeList, rowHeight]
-  );
 
   useEffect(
     () => () => {
-      if (scrollFrameRef.current !== null) {
-        window.clearTimeout(scrollFrameRef.current);
-      }
+      cancelScrollUpdate(scrollFrameRef.current);
+      scrollFrameRef.current = null;
     },
     []
   );
 
-  const overscan = 12;
+  const overscan = 24;
   const firstVisibleRow = Math.max(
     0,
     Math.floor(scrollTop / rowHeight) - overscan
@@ -1442,6 +1526,10 @@ export const ListView: React.FC<CommonViewProps> = ({
 
   const visibleEntriesRef = useRef<FileEntry[]>(visibleEntries);
   visibleEntriesRef.current = visibleEntries;
+  const virtualRowsRef = useRef(virtualRows);
+  virtualRowsRef.current = virtualRows;
+  const isLargeListRef = useRef(isLargeList);
+  isLargeListRef.current = isLargeList;
 
   const handleClickEntryByPath = useCallback(
     (path: string, modifiers: SelectionModifiers) => {
@@ -1461,12 +1549,33 @@ export const ListView: React.FC<CommonViewProps> = ({
     [onStartItemDrag]
   );
 
+  const getListMarqueeHits = useCallback(
+    (rect: MarqueeRect): string[] | null => {
+      if (!isLargeListRef.current) return null;
+      const rows = virtualRowsRef.current;
+      if (rows.length === 0) return [];
+      const minRow = Math.max(0, Math.floor(rect.top / rowHeight));
+      const maxRow = Math.min(
+        rows.length - 1,
+        Math.floor((rect.top + rect.height) / rowHeight)
+      );
+      const hits: string[] = [];
+      for (let i = minRow; i <= maxRow; i++) {
+        const entry = rows[i]?.entry;
+        if (entry) hits.push(entry.path);
+      }
+      return hits;
+    },
+    [rowHeight]
+  );
+
   const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
     containerRef,
     selectedPaths,
     onSetSelection,
     onClearSelection,
     onClickEntryFallback: handleClickEntryByPath,
+    getHitPaths: getListMarqueeHits,
   });
 
   const toggleExpandDir = useCallback(
@@ -1683,7 +1792,6 @@ export const ListView: React.FC<CommonViewProps> = ({
         ref={containerRef}
         data-tab-scroll-view="list"
         onScroll={handleListScroll}
-        onWheel={handleListWheel}
         onMouseDown={handleContainerMouseDown}
         className="relative flex-1 min-h-0 overflow-auto min-w-0"
       >
@@ -1983,7 +2091,7 @@ const ColumnPaneView = React.memo<{
   const paneRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(600);
-  const scrollFrameRef = useRef<number | null>(null);
+  const scrollFrameRef = useRef<ScrollFrameHandle | null>(null);
 
   const zoomScale = iconSize / 64;
   const colIconSize = Math.max(14, Math.min(32, Math.round(18 * zoomScale)));
@@ -2023,12 +2131,35 @@ const ColumnPaneView = React.memo<{
     [colIdx, onActivateEntry, onStartItemDrag]
   );
 
+  const displayEntriesRef = useRef<FileEntry[]>(col.entries);
+
+  const getColumnMarqueeHits = useCallback(
+    (rect: MarqueeRect): string[] | null => {
+      const list = displayEntriesRef.current;
+      if (list.length <= COLUMN_VIRTUALIZATION_THRESHOLD) return null;
+      const boxBottom = rect.top + rect.height;
+      if (boxBottom <= 4) return [];
+      const minRow = Math.max(0, Math.floor((rect.top - 4) / rowHeight));
+      const maxRow = Math.min(
+        list.length - 1,
+        Math.floor((boxBottom - 4 - 0.001) / rowHeight)
+      );
+      const hits: string[] = [];
+      for (let i = minRow; i <= maxRow; i++) {
+        hits.push(list[i].path);
+      }
+      return hits;
+    },
+    [rowHeight]
+  );
+
   const { marqueeRect, handleContainerMouseDown } = useMarqueeSelection({
     containerRef: paneRef,
     selectedPaths,
     onSetSelection,
     onClearSelection,
     onClickEntryFallback: handleClickEntryByPath,
+    getHitPaths: getColumnMarqueeHits,
   });
 
   const colFolderName =
@@ -2074,6 +2205,7 @@ const ColumnPaneView = React.memo<{
     }
     return col.entries;
   }, [col.entries, col.path, renamingPath, renameValue]);
+  displayEntriesRef.current = displayEntries;
 
   const isLargeColumn = displayEntries.length > COLUMN_VIRTUALIZATION_THRESHOLD;
 
@@ -2093,22 +2225,21 @@ const ColumnPaneView = React.memo<{
 
   const handlePaneScroll = useCallback(() => {
     if (!isLargeColumn || scrollFrameRef.current !== null) return;
-    scrollFrameRef.current = window.setTimeout(() => {
+    scrollFrameRef.current = scheduleScrollUpdate(() => {
       scrollFrameRef.current = null;
       setScrollTop(paneRef.current?.scrollTop || 0);
-    }, 16);
+    });
   }, [isLargeColumn]);
 
   useEffect(
     () => () => {
-      if (scrollFrameRef.current !== null) {
-        window.clearTimeout(scrollFrameRef.current);
-      }
+      cancelScrollUpdate(scrollFrameRef.current);
+      scrollFrameRef.current = null;
     },
     []
   );
 
-  const overscan = 10;
+  const overscan = 20;
   const firstVisibleRow = isLargeColumn
     ? Math.max(0, Math.floor(scrollTop / rowHeight) - overscan)
     : 0;
@@ -2822,7 +2953,7 @@ export const GalleryView: React.FC<CommonViewProps> = ({
     []
   );
 
-  const filmstripOverscan = 8;
+  const filmstripOverscan = 16;
   const firstVisibleIndex = isLargeFilmstrip
     ? Math.max(
         0,
