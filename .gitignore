@@ -7,3 +7,5 @@ vfinder-release/
 *.py[cod]
 .DS_Store
 *.log
+vfinder-gtk4/
+
